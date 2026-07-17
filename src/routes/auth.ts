@@ -68,7 +68,7 @@ authRouter.post('/register', async (req, res) => {
  */
 authRouter.post('/google', async (req, res) => {
   try {
-    const { code } = req.body;
+    const { code, isLogin } = req.body;
 
     if (!code) {
       res.status(400).json({ error: 'Authorization code is required' });
@@ -121,7 +121,7 @@ authRouter.post('/google', async (req, res) => {
       return;
     }
 
-    // Step 3: Find or create user in Supabase Auth + our users table
+    // Step 3: Check if user exists in our DB
     const { data: existingUser } = await supabaseAdmin
       .from('users')
       .select('id')
@@ -129,7 +129,13 @@ authRouter.post('/google', async (req, res) => {
       .maybeSingle();
 
     if (!existingUser) {
-      // New user — create in Supabase Auth
+      if (isLogin) {
+        // User doesn't exist, and they are trying to log in
+        res.status(404).json({ error: 'You need to signup, no such user exists.' });
+        return;
+      }
+
+      // User doesn't exist, and they are trying to sign up — create in Supabase Auth
       const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
         email,
         email_confirm: true,
