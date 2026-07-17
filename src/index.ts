@@ -28,7 +28,10 @@ app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: (origin, callback) => {
+      // Allow any origin dynamically to support Vercel preview branches
+      callback(null, true);
+    },
     credentials: true,
   })
 );
