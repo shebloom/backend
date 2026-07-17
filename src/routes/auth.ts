@@ -97,7 +97,7 @@ authRouter.post('/google', async (req, res) => {
       }),
     });
 
-    const tokens = await tokenRes.json();
+    const tokens = (await tokenRes.json()) as any;
 
     if (!tokens.id_token) {
       console.error('Google token exchange failed:', tokens);
