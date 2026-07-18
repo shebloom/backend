@@ -45,6 +45,39 @@ adminRouter.get('/doctor-applications', async (_req, res) => {
 });
 
 /**
+ * GET /api/admin/doctor-applications/documents/:filename
+ * Streams/downloads doctor application documents securely.
+ */
+adminRouter.get('/doctor-applications/documents/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { data, error } = await supabaseAdmin.storage
+      .from('doctor-documents')
+      .download(filename);
+
+    if (error || !data) {
+      console.error('Storage download error:', error);
+      res.status(404).json({ error: 'Document not found' });
+      return;
+    }
+
+    const buffer = Buffer.from(await data.arrayBuffer());
+    const ext = filename.split('.').pop()?.toLowerCase();
+    if (ext === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf');
+    } else if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext || '')) {
+      res.setHeader('Content-Type', `image/${ext === 'jpg' ? 'jpeg' : ext}`);
+    } else {
+      res.setHeader('Content-Type', 'application/octet-stream');
+    }
+    res.send(buffer);
+  } catch (err) {
+    console.error('Download application document error:', err);
+    res.status(500).json({ error: 'Failed to retrieve document' });
+  }
+});
+
+/**
  * PATCH /api/admin/doctor-applications/:id
  * Approve or reject a doctor application.
  */
@@ -522,12 +555,11 @@ adminRouter.get('/consultations', async (_req, res) => {
 adminRouter.get('/programs', async (_req, res) => {
   try {
     const { data, error } = await supabaseAdmin
-      .from('programs')
+      .from('wellness_programs')
       .select('*')
       .order('created_at', { ascending: false });
 
     if (error) {
-      // programs table may not exist yet
       res.json({ programs: [] });
       return;
     }
@@ -545,15 +577,21 @@ adminRouter.get('/programs', async (_req, res) => {
  */
 adminRouter.post('/programs', async (req, res) => {
   try {
-    const { title, description, duration_weeks, category, is_active } = req.body;
+    const { title, description, duration_weeks, category, content, benefits, is_active } = req.body;
+
+    const durationText = `${duration_weeks || 4} Weeks`;
+    const defaultImage = 'https://images.pexels.com/photos/3822621/pexels-photo-3822621.jpeg?auto=compress&cs=tinysrgb&w=400';
 
     const { data, error } = await supabaseAdmin
-      .from('programs')
+      .from('wellness_programs')
       .insert({
         title,
         description,
-        duration_weeks,
+        duration: durationText,
         category,
+        content: content || null,
+        benefits: benefits || null,
+        image_url: defaultImage,
         is_active: is_active !== false,
       })
       .select()
@@ -579,7 +617,7 @@ adminRouter.post('/programs', async (req, res) => {
 adminRouter.delete('/programs/:id', async (req, res) => {
   try {
     const { error } = await supabaseAdmin
-      .from('programs')
+      .from('wellness_programs')
       .delete()
       .eq('id', req.params.id);
 
@@ -620,3 +658,95 @@ adminRouter.delete('/posts/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to delete post' });
   }
 });
+
+/**
+ * GET /api/admin/wellness-sessions
+ * Returns all wellness sessions.
+ */
+adminRouter.get('/wellness-sessions', async (_req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('wellness_sessions')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to fetch wellness sessions' });
+      return;
+    }
+
+    res.json({ sessions: data || [] });
+  } catch (err) {
+    console.error('Get wellness-sessions error:', err);
+    res.status(500).json({ error: 'Failed to fetch wellness sessions' });
+  }
+});
+
+/**
+ * POST /api/admin/wellness-sessions
+ * Create a new wellness session.
+ */
+adminRouter.post('/wellness-sessions', async (req, res) => {
+  try {
+    const { title, subtitle, duration, type, category, scheduled_at, thumbnail_url } = req.body;
+
+    if (!title || !subtitle || !duration || !type || !category) {
+      res.status(400).json({ error: 'title, subtitle, duration, type, and category are required' });
+      return;
+    }
+
+    const defaultImage = type === 'live' 
+      ? 'https://images.pexels.com/photos/3822621/pexels-photo-3822621.jpeg?auto=compress&cs=tinysrgb&w=400'
+      : 'https://images.pexels.com/photos/3759657/pexels-photo-3759657.jpeg?auto=compress&cs=tinysrgb&w=400';
+
+    const { data, error } = await supabaseAdmin
+      .from('wellness_sessions')
+      .insert({
+        title,
+        subtitle,
+        duration,
+        type,
+        category,
+        scheduled_at: scheduled_at || null,
+        thumbnail_url: thumbnail_url || defaultImage,
+        is_active: true,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Create wellness session DB error:', JSON.stringify(error));
+      res.status(500).json({ error: 'Failed to create wellness session' });
+      return;
+    }
+
+    res.status(201).json({ session: data });
+  } catch (err) {
+    console.error('Create wellness session error:', err);
+    res.status(500).json({ error: 'Failed to create wellness session' });
+  }
+});
+
+/**
+ * DELETE /api/admin/wellness-sessions/:id
+ * Delete a wellness session.
+ */
+adminRouter.delete('/wellness-sessions/:id', async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from('wellness_sessions')
+      .delete()
+      .eq('id', req.params.id);
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to delete wellness session' });
+      return;
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete wellness session error:', err);
+    res.status(500).json({ error: 'Failed to delete wellness session' });
+  }
+});
+

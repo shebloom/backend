@@ -17,6 +17,45 @@ appointmentsRouter.post('/', requireAuth, async (req: AuthenticatedRequest, res)
       return;
     }
 
+    // Enforce 3 free consultations limit
+    let { data: membership, error: membError } = await supabaseAdmin
+      .from('memberships')
+      .select('*')
+      .eq('user_id', req.userId)
+      .maybeSingle();
+
+    if (membError) {
+      console.error('Failed to query membership:', membError);
+    }
+
+    // Auto-provision a free tier membership if not present
+    if (!membership) {
+      const expiryDate = new Date();
+      expiryDate.setDate(expiryDate.getDate() + 30);
+      const newMemb = {
+        user_id: req.userId,
+        plan_id: 'free_tier',
+        status: 'active',
+        current_period_end: expiryDate.toISOString(),
+        consultations_total: 3,
+        consultations_remaining: 3,
+      };
+      const { data: createdMemb, error: insertError } = await supabaseAdmin
+        .from('memberships')
+        .insert(newMemb)
+        .select()
+        .single();
+
+      if (!insertError && createdMemb) {
+        membership = createdMemb;
+      }
+    }
+
+    if (membership && membership.consultations_remaining <= 0) {
+      res.status(403).json({ error: 'You have used all of your 3 free consultations. Please upgrade your plan.' });
+      return;
+    }
+
     // Check if slot is still available
     const { data: existing } = await supabaseAdmin
       .from('appointments')
@@ -50,6 +89,20 @@ appointmentsRouter.post('/', requireAuth, async (req: AuthenticatedRequest, res)
       console.error('Booking error:', error);
       res.status(500).json({ error: 'Failed to book appointment' });
       return;
+    }
+
+    // Decrement consultations_remaining in membership if it exists
+    const { data: membership } = await supabaseAdmin
+      .from('memberships')
+      .select('consultations_remaining')
+      .eq('user_id', req.userId)
+      .maybeSingle();
+
+    if (membership && membership.consultations_remaining > 0) {
+      await supabaseAdmin
+        .from('memberships')
+        .update({ consultations_remaining: membership.consultations_remaining - 1 })
+        .eq('user_id', req.userId);
     }
 
     res.status(201).json({ appointment: data });

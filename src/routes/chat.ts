@@ -99,19 +99,78 @@ chatRouter.post('/messages', requireAuth, async (req: AuthenticatedRequest, res)
 
 /**
  * POST /api/chat/conversations
- * Start a new conversation with a doctor (or get existing one).
+ * Start a new conversation with a doctor/patient (or get existing one).
  */
 chatRouter.post('/conversations', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { doctor_id } = req.body;
+    const { doctor_id, recipientId } = req.body;
+    const targetId = recipientId || doctor_id;
+
+    if (!targetId) {
+      res.status(400).json({ error: 'recipientId or doctor_id is required' });
+      return;
+    }
+
+    // Resolve targetUserId and doctorTableId
+    // It could be doctors.id or users.id
+    const { data: doctorRecord } = await supabaseAdmin
+      .from('doctors')
+      .select('user_id, id')
+      .eq('id', targetId)
+      .maybeSingle();
+
+    let targetUserId = targetId;
+    if (doctorRecord) {
+      targetUserId = doctorRecord.user_id;
+    }
+
+    let patient_id_resolved = '';
+    let doctor_id_resolved = '';
+
+    if (req.userRole === 'doctor') {
+      doctor_id_resolved = req.userId!;
+      patient_id_resolved = targetUserId;
+    } else {
+      patient_id_resolved = req.userId!;
+      doctor_id_resolved = targetUserId;
+    }
+
+    // Lookup the doctor table ID
+    const { data: doctorInfo } = await supabaseAdmin
+      .from('doctors')
+      .select('id')
+      .eq('user_id', doctor_id_resolved)
+      .maybeSingle();
+    const actualDoctorTableId = doctorInfo?.id;
+
+    // Enforce booking check for patients
+    if (req.userRole === 'patient') {
+      if (!actualDoctorTableId) {
+        res.status(404).json({ error: 'Doctor record not found' });
+        return;
+      }
+
+      const { data: booking } = await supabaseAdmin
+        .from('appointments')
+        .select('id')
+        .eq('patient_id', req.userId)
+        .eq('doctor_id', actualDoctorTableId)
+        .limit(1)
+        .maybeSingle();
+
+      if (!booking) {
+        res.status(403).json({ error: 'You must have a booking with this doctor to access chat.' });
+        return;
+      }
+    }
 
     // Check if conversation already exists
     const { data: existing } = await supabaseAdmin
       .from('chat_conversations')
       .select('*')
-      .eq('patient_id', req.userId)
-      .eq('doctor_id', doctor_id)
-      .single();
+      .eq('patient_id', patient_id_resolved)
+      .eq('doctor_id', doctor_id_resolved)
+      .maybeSingle();
 
     if (existing) {
       res.json({ conversation: existing });
@@ -122,13 +181,14 @@ chatRouter.post('/conversations', requireAuth, async (req: AuthenticatedRequest,
     const { data, error } = await supabaseAdmin
       .from('chat_conversations')
       .insert({
-        patient_id: req.userId,
-        doctor_id,
+        patient_id: patient_id_resolved,
+        doctor_id: doctor_id_resolved,
       })
       .select()
       .single();
 
     if (error) {
+      console.error('Create conversation DB error:', error);
       res.status(500).json({ error: 'Failed to create conversation' });
       return;
     }
