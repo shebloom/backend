@@ -92,6 +92,7 @@ adminRouter.patch('/doctor-applications/:id', async (req: AuthenticatedRequest, 
         category: application.category,
         license_number: application.license_number,
         status: 'approved',
+        slot_duration: application.slot_duration || 30,
       });
 
       await supabaseAdmin

@@ -98,7 +98,16 @@ doctorsRouter.get('/:id/slots', async (req, res) => {
       .eq('doctor_id', req.params.id)
       .eq('day_of_week', dayOfWeek);
 
-    // Fetch existing appointments for that date to exclude booked slots
+    // Fetch doctor's custom slot_duration
+    const { data: doctor } = await supabaseAdmin
+      .from('doctors')
+      .select('slot_duration')
+      .eq('id', req.params.id)
+      .single();
+
+    const duration = doctor?.slot_duration || 30;
+
+    // Fetch existing appointments for that date to check booked slots
     const { data: bookedSlots } = await supabaseAdmin
       .from('appointments')
       .select('slot_time')
@@ -106,19 +115,25 @@ doctorsRouter.get('/:id/slots', async (req, res) => {
       .eq('appointment_date', date)
       .in('status', ['confirmed', 'pending']);
 
-    const bookedTimes = new Set((bookedSlots || []).map((s: any) => s.slot_time));
+    const bookedTimes = new Set(
+      (bookedSlots || []).map((s: any) => {
+        if (typeof s.slot_time === 'string') {
+          return s.slot_time.substring(0, 5); // Normalize "HH:MM:SS" to "HH:MM"
+        }
+        return s.slot_time;
+      })
+    );
 
     // Generate available slots from availability windows
-    const slots: string[] = [];
+    const slots: { time: string, isBooked: boolean }[] = [];
     for (const window of availability || []) {
       let current = parseTime(window.start_time);
       const end = parseTime(window.end_time);
       while (current < end) {
         const timeStr = formatTime(current);
-        if (!bookedTimes.has(timeStr)) {
-          slots.push(timeStr);
-        }
-        current += 30; // 30-minute slots
+        const isBooked = bookedTimes.has(timeStr);
+        slots.push({ time: timeStr, isBooked });
+        current += duration; // Use doctor's custom slot duration (time gap)
       }
     }
 
@@ -135,7 +150,7 @@ doctorsRouter.get('/:id/slots', async (req, res) => {
  */
 doctorsRouter.post('/apply', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { specialty, experience_years, languages, consultation_fee, consultation_type, category, license_number, document_urls } = req.body;
+    const { specialty, experience_years, languages, consultation_fee, consultation_type, category, license_number, document_urls, slot_duration } = req.body;
 
     // Check if they already applied
     const { data: existingApps } = await supabaseAdmin
@@ -171,7 +186,8 @@ doctorsRouter.post('/apply', requireAuth, async (req: AuthenticatedRequest, res)
         consultation_fee,
         consultation_type,
         category,
-        license_number
+        license_number,
+        slot_duration: slot_duration || 30
       })
       .select('id')
       .single();
