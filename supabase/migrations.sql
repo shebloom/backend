@@ -166,9 +166,10 @@ CREATE TABLE public.wellness_sessions (
     title TEXT NOT NULL,
     subtitle TEXT NOT NULL,
     duration TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('live', 'self-paced')),
+    type TEXT NOT NULL CHECK (type IN ('live', 'self-paced', 'recorded')),
     scheduled_at TIMESTAMPTZ,
     thumbnail_url TEXT NOT NULL,
+    video_url TEXT,
     category TEXT NOT NULL,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -327,3 +328,82 @@ ALTER TABLE public.admin_notifications ENABLE ROW LEVEL SECURITY;
 -- Note: In a real Supabase environment, you would define RLS policies here. 
 -- For now, the backend will handle access control using the service_role key, 
 -- and frontend uses the backend API.
+
+-- ─── STEP 7 PERFORMANCE INDEXES & TABLES ─────────────────────────────────────
+
+-- Appointments Indexes
+CREATE INDEX IF NOT EXISTS idx_appointments_patient_date ON public.appointments (patient_id, appointment_date DESC);
+CREATE INDEX IF NOT EXISTS idx_appointments_doctor_date ON public.appointments (doctor_id, appointment_date, slot_time);
+CREATE INDEX IF NOT EXISTS idx_appointments_status ON public.appointments (status);
+
+-- Chat Messages Indexes
+CREATE INDEX IF NOT EXISTS idx_chat_messages_convo_created ON public.chat_messages (conversation_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_sender ON public.chat_messages (sender_id);
+
+-- Doctor Availability Indexes
+CREATE INDEX IF NOT EXISTS idx_doctor_availability_lookup ON public.doctor_availability (doctor_id, day_of_week);
+
+-- Community Posts Indexes
+CREATE INDEX IF NOT EXISTS idx_community_posts_created ON public.community_posts (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_community_posts_category ON public.community_posts (category, created_at DESC);
+
+-- Cycle Logs Indexes
+CREATE INDEX IF NOT EXISTS idx_cycle_logs_user_date ON public.cycle_logs (user_id, start_date DESC);
+
+-- Background Job Queue Table & Indexes
+CREATE TABLE IF NOT EXISTS public.job_queue (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_type TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+    attempts INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 3,
+    error_message TEXT,
+    run_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_queue_status_run ON public.job_queue (status, run_at ASC);
+
+-- Yoga Conditions & Videos Tables & Indexes
+CREATE TABLE IF NOT EXISTS public.yoga_conditions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    category_slug TEXT UNIQUE NOT NULL,
+    description TEXT,
+    thumbnail_url TEXT,
+    order_index INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.yoga_videos (
+    id TEXT PRIMARY KEY,
+    condition_id TEXT REFERENCES public.yoga_conditions(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT,
+    duration TEXT NOT NULL DEFAULT '20 min',
+    video_url TEXT NOT NULL,
+    thumbnail_url TEXT,
+    order_index INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_yoga_videos_condition ON public.yoga_videos (condition_id, order_index ASC);
+
+-- Diet Plans Table & Indexes
+CREATE TABLE IF NOT EXISTS public.diet_plans (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    appointment_id UUID UNIQUE REFERENCES public.appointments(id) ON DELETE CASCADE,
+    patient_id UUID REFERENCES public.users(id) NOT NULL,
+    doctor_id UUID REFERENCES public.users(id) NOT NULL,
+    title TEXT NOT NULL,
+    plan_details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    document_url TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_diet_plans_patient ON public.diet_plans (patient_id, created_at DESC);
+

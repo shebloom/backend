@@ -18,6 +18,7 @@ import { communityRouter } from './routes/community';
 import { membershipRouter } from './routes/membership';
 import { adminRouter } from './routes/admin';
 import { doctorPortalRouter } from './routes/doctor-portal';
+import { dietRouter } from './routes/diet';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -25,7 +26,8 @@ const PORT = process.env.PORT || 4000;
 // ─── Middleware ──────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(morgan('dev'));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -55,6 +57,7 @@ app.use('/api/community', communityRouter);
 app.use('/api/membership', membershipRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/doctor-portal', doctorPortalRouter);
+app.use('/api/diet', dietRouter);
 
 // ─── 404 handler ────────────────────────────────────────────────────────────
 app.use((_req, res) => {
@@ -67,8 +70,15 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: 'Internal server error' });
 });
 
+import { startJobQueueWorker } from './lib/jobQueue';
+import { getOrCreateDrDeepa } from './routes/doctors';
+
 app.listen(PORT, () => {
   console.log(`🌸 SheBloom API running on http://localhost:${PORT}`);
+  startJobQueueWorker();
+  getOrCreateDrDeepa()
+    .then(() => console.log('✅ Dr. Deepa verified and seeded by default'))
+    .catch((err) => console.error('Failed to seed Dr. Deepa:', err));
 });
 
 export default app;

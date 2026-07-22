@@ -31,7 +31,7 @@ authRouter.post('/register', async (req, res) => {
       // Map common errors to friendly messages
       const msg = authError.message || '';
       if (msg.includes('already been registered') || msg.includes('already exists')) {
-        res.status(409).json({ error: 'An account with this email already exists. Try logging in instead!' });
+        res.status(409).json({ error: 'You already have an account — please sign in instead' });
         return;
       }
       res.status(400).json({ error: msg || 'Failed to create account' });
@@ -56,6 +56,63 @@ authRouter.post('/register', async (req, res) => {
   } catch (err) {
     console.error('Register error:', err);
     res.status(500).json({ error: 'Failed to create account' });
+  }
+});
+
+/**
+ * POST /api/auth/login
+ * Server-side login endpoint to cleanly differentiate between:
+ * 1) Account non-existent -> 404 "We couldn't find an account with these details — please sign up first"
+ * 2) Incorrect password -> 400 "Incorrect password. Please check your password and try again."
+ * 3) Valid login -> Returns session token
+ */
+authRouter.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      res.status(400).json({ error: 'Email and password are required' });
+      return;
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Step 1: Check if user exists in DB or Supabase Auth
+    const { data: dbUser } = await supabaseAdmin
+      .from('users')
+      .select('id, email, full_name, role')
+      .eq('email', cleanEmail)
+      .maybeSingle();
+
+    if (!dbUser) {
+      // Also check Supabase Auth table
+      const { data: listData } = await supabaseAdmin.auth.admin.listUsers();
+      const existsInAuth = listData?.users?.some(u => u.email?.toLowerCase() === cleanEmail);
+      
+      if (!existsInAuth) {
+        res.status(404).json({ error: "We couldn't find an account with these details — please sign up first" });
+        return;
+      }
+    }
+
+    // Step 2: Attempt authentication
+    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'magiclink',
+      email: cleanEmail,
+    });
+
+    if (linkError || !linkData) {
+      res.status(400).json({ error: 'Incorrect password or authentication failed' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      token_hash: linkData.properties?.hashed_token,
+    });
+  } catch (err) {
+    console.error('Server login error:', err);
+    res.status(500).json({ error: 'Failed to process login' });
   }
 });
 
@@ -131,7 +188,7 @@ authRouter.post('/google', async (req, res) => {
     if (!existingUser) {
       if (isLogin) {
         // User doesn't exist, and they are trying to log in
-        res.status(404).json({ error: 'You need to signup, no such user exists.' });
+        res.status(404).json({ error: "We couldn't find an account with these details — please sign up first" });
         return;
       }
 
@@ -267,6 +324,21 @@ authRouter.get('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
       data = newUser;
     }
 
+    // Fetch authUser metadata to merge extra fields
+    let medical_conditions: string | null = null;
+    let dietary_preference: string | null = null;
+    let symptoms: string | null = null;
+    try {
+      const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId!);
+      if (authUser?.user_metadata) {
+        medical_conditions = authUser.user_metadata.medical_conditions || null;
+        dietary_preference = authUser.user_metadata.dietary_preference || null;
+        symptoms = authUser.user_metadata.symptoms || null;
+      }
+    } catch (e) {
+      console.warn('Failed to fetch authUser metadata:', e);
+    }
+
     // Check if user has a doctor application
     let doctor_application_status: string | null = null;
     const { data: application } = await supabaseAdmin
@@ -281,7 +353,15 @@ authRouter.get('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
       doctor_application_status = application.status;
     }
 
-    res.json({ user: { ...data, doctor_application_status } });
+    res.json({
+      user: {
+        ...data,
+        doctor_application_status,
+        medical_conditions,
+        dietary_preference,
+        symptoms,
+      },
+    });
   } catch (err) {
     console.error('Get profile error:', err);
     res.status(500).json({ error: 'Failed to get profile' });
@@ -314,7 +394,51 @@ authRouter.patch('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
       return;
     }
 
-    res.json({ user: data });
+    // Update Auth User Metadata if clinical diet fields are present
+    const { medical_conditions, dietary_preference, symptoms } = req.body;
+    let finalConditions = medical_conditions;
+    let finalPreference = dietary_preference;
+    let finalSymptoms = symptoms;
+
+    if (medical_conditions !== undefined || dietary_preference !== undefined || symptoms !== undefined) {
+      try {
+        const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId);
+        const currentMeta = authUser?.user_metadata || {};
+        const newMeta: any = { ...currentMeta };
+        if (medical_conditions !== undefined) newMeta.medical_conditions = medical_conditions;
+        if (dietary_preference !== undefined) newMeta.dietary_preference = dietary_preference;
+        if (symptoms !== undefined) newMeta.symptoms = symptoms;
+
+        await supabaseAdmin.auth.admin.updateUserById(req.userId, {
+          user_metadata: newMeta,
+        });
+
+        finalConditions = newMeta.medical_conditions || null;
+        finalPreference = newMeta.dietary_preference || null;
+        finalSymptoms = newMeta.symptoms || null;
+      } catch (e) {
+        console.error('Failed to update Auth metadata:', e);
+      }
+    } else {
+      // Fetch current metadata to return in response
+      try {
+        const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId);
+        finalConditions = authUser?.user_metadata?.medical_conditions || null;
+        finalPreference = authUser?.user_metadata?.dietary_preference || null;
+        finalSymptoms = authUser?.user_metadata?.symptoms || null;
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    res.json({
+      user: {
+        ...data,
+        medical_conditions: finalConditions,
+        dietary_preference: finalPreference,
+        symptoms: finalSymptoms,
+      },
+    });
   } catch (err) {
     console.error('Update profile error:', err);
     res.status(500).json({ error: 'Failed to update profile' });

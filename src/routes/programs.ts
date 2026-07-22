@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 
+import { LOCAL_WELLNESS_PROGRAMS } from '../lib/memoryStore';
+
 export const programsRouter = Router();
 
 /**
@@ -21,17 +23,22 @@ programsRouter.get('/', async (req, res) => {
       query = query.eq('category', category);
     }
 
-    const { data, error } = await query.order('created_at', { ascending: false });
+    const { data } = await query.order('created_at', { ascending: false });
+    const dbPrograms = data || [];
+    
+    // Combine db and memory programs
+    const combined = [...LOCAL_WELLNESS_PROGRAMS, ...dbPrograms];
+    const unique = Array.from(new Map(combined.map(p => [p.id, p])).values());
 
-    if (error) {
-      res.status(500).json({ error: 'Failed to fetch programs' });
-      return;
-    }
+    // Apply category filtering to combined list
+    const filtered = category && category !== 'All'
+      ? unique.filter(p => p.category?.toLowerCase() === (category as string).toLowerCase())
+      : unique;
 
-    res.json({ programs: data || [] });
+    res.json({ programs: filtered });
   } catch (err) {
     console.error('Get programs error:', err);
-    res.status(500).json({ error: 'Failed to fetch programs' });
+    res.json({ programs: LOCAL_WELLNESS_PROGRAMS });
   }
 });
 
@@ -40,6 +47,12 @@ programsRouter.get('/', async (req, res) => {
  */
 programsRouter.get('/:id', async (req, res) => {
   try {
+    const memProg = LOCAL_WELLNESS_PROGRAMS.find(p => p.id === req.params.id);
+    if (memProg) {
+      res.json({ program: memProg });
+      return;
+    }
+
     const { data, error } = await supabaseAdmin
       .from('wellness_programs')
       .select('*')

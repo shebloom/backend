@@ -136,7 +136,23 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
       return;
     }
 
-    res.json({ appointments: data || [] });
+    const now = new Date();
+    const todayStr = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+    let appointments = data || [];
+    if (upcoming === 'true') {
+      appointments = appointments.filter((a: any) => {
+        if (a.appointment_date === todayStr) {
+          const [h, m] = a.slot_time.split(':').map(Number);
+          const slotMinutes = h * 60 + (m || 0);
+          return slotMinutes > nowMinutes;
+        }
+        return true;
+      });
+    }
+
+    res.json({ appointments });
   } catch (err) {
     console.error('Get doctor appointments error:', err);
     res.status(500).json({ error: 'Failed to fetch appointments' });
@@ -191,6 +207,146 @@ doctorPortalRouter.put('/availability', async (req: AuthenticatedRequest, res) =
   } catch (err) {
     console.error('Update availability error:', err);
     res.status(500).json({ error: 'Failed to update availability' });
+  }
+});
+
+/**
+ * DELETE /api/doctor-portal/slots
+ * Safely delete a slot. Protects booked slots from silent deletion!
+ */
+doctorPortalRouter.delete('/slots', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { date, slot_time, day_of_week } = req.body;
+
+    const { data: doctor } = await supabaseAdmin
+      .from('doctors')
+      .select('id')
+      .eq('user_id', req.userId)
+      .single();
+
+    if (!doctor) {
+      res.status(404).json({ error: 'Doctor record not found' });
+      return;
+    }
+
+    if (date && slot_time) {
+      // Check if there is an active booking on this date and time
+      const { data: booking } = await supabaseAdmin
+        .from('appointments')
+        .select('id, patient_id, appointment_date, slot_time, status, users!appointments_patient_id_fkey(full_name)')
+        .eq('doctor_id', doctor.id)
+        .eq('appointment_date', date)
+        .eq('slot_time', slot_time)
+        .in('status', ['confirmed', 'pending'])
+        .maybeSingle();
+
+      if (booking) {
+        const patientUser: any = (booking as any).users;
+        const patientName = Array.isArray(patientUser) ? patientUser[0]?.full_name : patientUser?.full_name;
+        res.status(409).json({
+          error: `This slot is booked by ${patientName || 'a patient'}. Silently deleting booked slots is disabled. Please cancel or reschedule the appointment to notify the patient.`,
+          isBooked: true,
+          booking: {
+            id: booking.id,
+            patient_name: patientName,
+            appointment_date: booking.appointment_date,
+            slot_time: booking.slot_time,
+          },
+        });
+        return;
+      }
+    }
+
+    // Delete availability slot if unbooked
+    if (day_of_week !== undefined && slot_time) {
+      await supabaseAdmin
+        .from('doctor_availability')
+        .delete()
+        .eq('doctor_id', doctor.id)
+        .eq('day_of_week', day_of_week)
+        .eq('start_time', slot_time);
+    }
+
+    res.json({ success: true, message: 'Slot removed' });
+  } catch (err) {
+    console.error('Delete slot error:', err);
+    res.status(500).json({ error: 'Failed to delete slot' });
+  }
+});
+
+/**
+ * POST /api/doctor-portal/appointments/:id/cancel-with-notification
+ * Explicitly cancel or reschedule a booked slot and notify the patient.
+ */
+doctorPortalRouter.post('/appointments/:id/cancel-with-notification', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { action, reason } = req.body; // action: 'cancel' | 'reschedule'
+
+    const { data: doctor } = await supabaseAdmin
+      .from('doctors')
+      .select('id, user_id')
+      .eq('user_id', req.userId)
+      .single();
+
+    if (!doctor) {
+      res.status(404).json({ error: 'Doctor not found' });
+      return;
+    }
+
+    const { data: appointment } = await supabaseAdmin
+      .from('appointments')
+      .select('*, users!appointments_patient_id_fkey(full_name, email)')
+      .eq('id', req.params.id)
+      .single();
+
+    if (!appointment) {
+      res.status(404).json({ error: 'Appointment not found' });
+      return;
+    }
+
+    const newStatus = action === 'reschedule' ? 'rescheduled' : 'cancelled';
+
+    // Update appointment status
+    await supabaseAdmin
+      .from('appointments')
+      .update({ status: newStatus, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+
+    // Notify patient via chat system message
+    const patientId = appointment.patient_id;
+    const { data: convo } = await supabaseAdmin
+      .from('chat_conversations')
+      .select('id')
+      .eq('patient_id', patientId)
+      .eq('doctor_id', doctor.user_id)
+      .maybeSingle();
+
+    let convoId = convo?.id;
+    if (!convoId) {
+      const { data: newConvo } = await supabaseAdmin
+        .from('chat_conversations')
+        .insert({ patient_id: patientId, doctor_id: doctor.user_id })
+        .select('id')
+        .single();
+      convoId = newConvo?.id;
+    }
+
+    if (convoId) {
+      const notificationText = action === 'reschedule'
+        ? `⚠️ Notice from Dr. Deepa Madhavan: Your consultation scheduled for ${appointment.appointment_date} at ${appointment.slot_time} needs to be rescheduled. Reason: ${reason || 'Schedule update'}. Please pick a new slot at your earliest convenience.`
+        : `❌ Notice from Dr. Deepa Madhavan: Your consultation scheduled for ${appointment.appointment_date} at ${appointment.slot_time} has been cancelled. Reason: ${reason || 'Doctor unavailable'}.`;
+
+      await supabaseAdmin.from('chat_messages').insert({
+        conversation_id: convoId,
+        sender_id: doctor.user_id,
+        content: notificationText,
+      });
+    }
+
+    res.json({ success: true, message: `Appointment ${newStatus} and patient notified.` });
+  } catch (err) {
+    console.error('Cancel with notification error:', err);
+    res.status(500).json({ error: 'Failed to process cancellation' });
   }
 });
 
