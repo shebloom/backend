@@ -181,9 +181,13 @@ doctorsRouter.get('/:id/slots', async (req, res) => {
       return;
     }
 
-    const isToday = new Date().toLocaleDateString('en-CA') === date; // YYYY-MM-DD
+    const offsetParam = req.query.offset;
+    const offsetMin = offsetParam ? parseInt(offsetParam as string) : 330; // Default to IST (+05:30)
     const now = new Date();
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const localNow = new Date(now.getTime() + offsetMin * 60 * 1000);
+    const todayStr = localNow.toISOString().split('T')[0];
+    const isToday = todayStr === date;
+    const nowMinutes = localNow.getUTCHours() * 60 + localNow.getUTCMinutes();
 
     const cacheKey = `slots:${date}`;
     if (!isToday) {
