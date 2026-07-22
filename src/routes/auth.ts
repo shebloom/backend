@@ -402,14 +402,14 @@ authRouter.patch('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
 
     if (medical_conditions !== undefined || dietary_preference !== undefined || symptoms !== undefined) {
       try {
-        const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId);
+        const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId!);
         const currentMeta = authUser?.user_metadata || {};
         const newMeta: any = { ...currentMeta };
         if (medical_conditions !== undefined) newMeta.medical_conditions = medical_conditions;
         if (dietary_preference !== undefined) newMeta.dietary_preference = dietary_preference;
         if (symptoms !== undefined) newMeta.symptoms = symptoms;
 
-        await supabaseAdmin.auth.admin.updateUserById(req.userId, {
+        await supabaseAdmin.auth.admin.updateUserById(req.userId!, {
           user_metadata: newMeta,
         });
 
@@ -422,7 +422,7 @@ authRouter.patch('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
     } else {
       // Fetch current metadata to return in response
       try {
-        const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId);
+        const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId!);
         finalConditions = authUser?.user_metadata?.medical_conditions || null;
         finalPreference = authUser?.user_metadata?.dietary_preference || null;
         finalSymptoms = authUser?.user_metadata?.symptoms || null;
