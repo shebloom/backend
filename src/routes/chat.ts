@@ -195,6 +195,7 @@ chatRouter.post('/conversations', requireAuth, async (req: AuthenticatedRequest,
       }
     }
 
+    // Check existing conversation FIRST
     const { data: existing } = await supabaseAdmin
       .from('chat_conversations')
       .select('*')
@@ -203,8 +204,29 @@ chatRouter.post('/conversations', requireAuth, async (req: AuthenticatedRequest,
       .maybeSingle();
 
     if (existing) {
-      res.json({ conversation: existing });
+      res.json({ conversation: existing, has_relationship: true });
       return;
+    }
+
+    if (req.userRole === 'patient') {
+      if (!actualDoctorTableId) {
+        res.status(404).json({ error: 'Doctor record not found' });
+        return;
+      }
+
+      // Check if ANY appointment (past, present, pending, completed) exists
+      const { data: booking } = await supabaseAdmin
+        .from('appointments')
+        .select('id')
+        .eq('patient_id', req.userId)
+        .eq('doctor_id', actualDoctorTableId)
+        .limit(1)
+        .maybeSingle();
+
+      if (!booking) {
+        res.status(403).json({ error: 'You must complete a booking with Dr. Deepa Madhavan before starting a new chat thread.', requires_booking: true, has_relationship: false });
+        return;
+      }
     }
 
     const { data, error } = await supabaseAdmin
@@ -222,10 +244,133 @@ chatRouter.post('/conversations', requireAuth, async (req: AuthenticatedRequest,
       return;
     }
 
-    res.status(201).json({ conversation: data });
+    res.status(201).json({ conversation: data, has_relationship: true });
   } catch (err) {
     console.error('Create conversation error:', err);
     res.status(500).json({ error: 'Failed to create conversation' });
+  }
+});
+
+/**
+ * GET /api/chat/doctor-access
+ * Single-call check: does this patient have an existing doctor chat or any past appointment?
+ * Used by the "Chat with Doctor" quick action on the home page.
+ * Returns:
+ *   - has_chat: true if a doctor conversation exists
+ *   - has_appointment: true if any appointment (any status) exists with a doctor
+ *   - conversation_id: the existing conversation ID (if has_chat)
+ *   - doctor_user_id: the doctor's user ID (to navigate to /chat/{id})
+ */
+chatRouter.get('/doctor-access', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    // 1. Check for any existing doctor conversation (excludes AI bot)
+    const { data: conversations } = await supabaseAdmin
+      .from('chat_conversations')
+      .select('id, doctor_id, last_message_at')
+      .eq('patient_id', req.userId)
+      .neq('doctor_id', AI_BOT_ID)
+      .order('last_message_at', { ascending: false })
+      .limit(1);
+
+    const latestConvo = conversations && conversations.length > 0 ? conversations[0] : null;
+
+    if (latestConvo) {
+      res.json({
+        has_chat: true,
+        has_appointment: true, // if a chat exists, a booking definitely exists
+        conversation_id: latestConvo.id,
+        doctor_user_id: latestConvo.doctor_id,
+      });
+      return;
+    }
+
+    // 2. No chat yet — check for any appointment (any status)
+    const { data: appointments } = await supabaseAdmin
+      .from('appointments')
+      .select('id, doctor_id, doctors(user_id)')
+      .eq('patient_id', req.userId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const latestAppt = appointments && appointments.length > 0 ? appointments[0] : null;
+
+    if (latestAppt) {
+      const doctorUserId = (latestAppt.doctors as any)?.user_id;
+      res.json({
+        has_chat: false,
+        has_appointment: true,
+        conversation_id: null,
+        doctor_user_id: doctorUserId || null,
+      });
+      return;
+    }
+
+    // 3. No chat, no appointment — must book first
+    res.json({
+      has_chat: false,
+      has_appointment: false,
+      conversation_id: null,
+      doctor_user_id: null,
+    });
+  } catch (err) {
+    console.error('Doctor access check error:', err);
+    res.status(500).json({ error: 'Failed to check doctor access' });
+  }
+});
+
+/**
+ * GET /api/chat/relationship/:doctorId
+ * Checks whether a prior relationship (chat thread or booking record) exists between patient and doctor.
+ */
+
+chatRouter.get('/relationship/:doctorId', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { doctorId } = req.params;
+    const patientId = req.userId!;
+
+    const { data: doctorRecord } = await supabaseAdmin
+      .from('doctors')
+      .select('user_id, id')
+      .or(`id.eq.${doctorId},user_id.eq.${doctorId}`)
+      .maybeSingle();
+
+    const doctorUserId = doctorRecord?.user_id || doctorId;
+    const doctorTableId = doctorRecord?.id;
+
+    // 1. Check existing conversation
+    const { data: convo } = await supabaseAdmin
+      .from('chat_conversations')
+      .select('id')
+      .eq('patient_id', patientId)
+      .eq('doctor_id', doctorUserId)
+      .maybeSingle();
+
+    if (convo) {
+      res.json({ has_relationship: true, doctor_user_id: doctorUserId, conversation_id: convo.id });
+      return;
+    }
+
+    // 2. Check any appointment record
+    let apptMatch = false;
+    if (doctorTableId) {
+      const { data: appt } = await supabaseAdmin
+        .from('appointments')
+        .select('id')
+        .eq('patient_id', patientId)
+        .eq('doctor_id', doctorTableId)
+        .limit(1)
+        .maybeSingle();
+      if (appt) apptMatch = true;
+    }
+
+    res.json({
+      has_relationship: apptMatch,
+      doctor_user_id: doctorUserId,
+      requires_booking: !apptMatch,
+    });
+  } catch (err) {
+    console.error('Check relationship error:', err);
+    res.status(500).json({ error: 'Failed to check relationship' });
   }
 });
 
@@ -239,7 +384,7 @@ chatRouter.post('/conversations', requireAuth, async (req: AuthenticatedRequest,
  */
 chatRouter.post('/ai/message', async (req, res) => {
   try {
-    const { content } = req.body;
+    const { content, history } = req.body;
     if (!content || typeof content !== 'string' || !content.trim()) {
       res.status(400).json({ error: 'Message content is required' });
       return;
@@ -258,13 +403,10 @@ chatRouter.post('/ai/message', async (req, res) => {
       }
     }
 
-    // Generate dynamic AI response via Grok xAI API or Gemini API
-    const aiText = await generateAiHealthResponse(content.trim());
-    const finalAiContent = `${aiText}\n\n*Note: This response is for general educational purposes only and is not a substitute for a real medical consultation.*`;
-
+    let historyList: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+    let convoId = `guest-convo-${Date.now()}`;
     let userMsg = null;
     let aiMsg = null;
-    let convoId = `guest-convo-${Date.now()}`;
 
     if (userId) {
       // Log to Postgres for authenticated users
@@ -286,25 +428,51 @@ chatRouter.post('/ai/message', async (req, res) => {
 
       if (convo) {
         convoId = convo.id;
-        const { data: uMsg } = await supabaseAdmin
+        // Fetch last 6 messages
+        const { data: dbMsgs } = await supabaseAdmin
           .from('chat_messages')
-          .insert({ conversation_id: convo.id, sender_id: userId, content: content.trim() })
-          .select()
-          .single();
-        userMsg = uMsg;
+          .select('sender_id, content')
+          .eq('conversation_id', convo.id)
+          .order('created_at', { ascending: false })
+          .limit(6);
 
-        const { data: aMsg } = await supabaseAdmin
-          .from('chat_messages')
-          .insert({ conversation_id: convo.id, sender_id: AI_BOT_ID, content: finalAiContent })
-          .select()
-          .single();
-        aiMsg = aMsg;
-
-        await supabaseAdmin
-          .from('chat_conversations')
-          .update({ last_message_at: new Date().toISOString() })
-          .eq('id', convo.id);
+        if (dbMsgs && dbMsgs.length > 0) {
+          historyList = dbMsgs.reverse().map(m => ({
+            role: m.sender_id === AI_BOT_ID ? 'model' as const : 'user' as const,
+            parts: [{ text: m.content }]
+          }));
+        }
       }
+    } else if (history && Array.isArray(history)) {
+      historyList = history.slice(-6).map((h: any) => ({
+        role: h.role === 'ai' || h.role === 'model' ? 'model' as const : 'user' as const,
+        parts: [{ text: h.content }]
+      }));
+    }
+
+    // Generate dynamic AI response via Grok xAI API or Gemini API
+    const aiText = await generateAiHealthResponse(content.trim(), historyList);
+    const finalAiContent = `${aiText}\n\n*Note: This response is for general educational purposes only and is not a substitute for a real medical consultation.*`;
+
+    if (userId && convoId.startsWith('guest-convo-') === false) {
+      const { data: uMsg } = await supabaseAdmin
+        .from('chat_messages')
+        .insert({ conversation_id: convoId, sender_id: userId, content: content.trim() })
+        .select()
+        .single();
+      userMsg = uMsg;
+
+      const { data: aMsg } = await supabaseAdmin
+        .from('chat_messages')
+        .insert({ conversation_id: convoId, sender_id: AI_BOT_ID, content: finalAiContent })
+        .select()
+        .single();
+      aiMsg = aMsg;
+
+      await supabaseAdmin
+        .from('chat_conversations')
+        .update({ last_message_at: new Date().toISOString() })
+        .eq('id', convoId);
     }
 
     if (!aiMsg) {
@@ -328,23 +496,35 @@ chatRouter.post('/ai/message', async (req, res) => {
   }
 });
 
-async function generateAiHealthResponse(question: string): Promise<string> {
+async function generateAiHealthResponse(
+  question: string,
+  historyList: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>
+): Promise<string> {
   const xaiApiKey = process.env.XAI_API_KEY || process.env.GROK_API_KEY;
   const geminiApiKey = process.env.GEMINI_API_KEY;
 
-  // System Prompt for Women's Health & Gynecological Persona
   const systemPrompt = `You are the SheBloom AI Health Assistant, a warm, highly empathetic, intelligent, and interactive women's health AI guide specializing in gynecology, menstrual cycle tracking, PCOS, PCOD, thyroid, and reproductive wellness.
+
 Guidelines:
 1. Provide interactive, engaging, supportive, and clear educational answers to the user's question.
 2. DO NOT provide official medical diagnoses, DO NOT prescribe medication or specific drug dosages.
 3. Encourage healthy lifestyle practices (pelvic yoga, seed cycling, hydration, stress management).
 4. Use bullet points and clear, structured sections.
-5. Conclude with a helpful follow-up tip or encouraging question to keep the conversation interactive.`;
+5. If the user's query describes actual clinical symptoms, requires diagnostic reviews (like ultrasound or blood test interpretation), or indicates the need for a physical examination, append the exact token "[RECOMMEND_BOOKING]" at the very end of your response, after any disclaimer. Do NOT use this token for general questions (like "What is seed cycling?" or "Tell me about yoga"). Only use it for queries suggesting active symptoms or doctor-examination needs.`;
 
   // 1. Try Grok (xAI API) if XAI_API_KEY / GROK_API_KEY is present
   if (xaiApiKey) {
     try {
       console.log('🤖 Invoking xAI Grok API...');
+      const grokMessages = [
+        { role: 'system', content: systemPrompt },
+        ...historyList.map(h => ({
+          role: h.role === 'model' ? 'assistant' as const : 'user' as const,
+          content: h.parts[0].text
+        })),
+        { role: 'user', content: question }
+      ];
+
       const grokRes = await fetch('https://api.x.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -353,10 +533,7 @@ Guidelines:
         },
         body: JSON.stringify({
           model: 'grok-2-latest',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: question },
-          ],
+          messages: grokMessages,
           temperature: 0.7,
         }),
       });
@@ -380,7 +557,9 @@ Guidelines:
   // 2. Try Gemini API if GEMINI_API_KEY is present
   if (geminiApiKey) {
     try {
-      console.log('🤖 Invoking Gemini API...');
+      console.log('🤖 Invoking Gemini API with history...');
+      const contents = [...historyList, { role: 'user' as const, parts: [{ text: question }] }];
+
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey.trim()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -388,7 +567,7 @@ Guidelines:
           system_instruction: {
             parts: [{ text: systemPrompt }]
           },
-          contents: [{ parts: [{ text: question }] }]
+          contents
         })
       });
 
@@ -410,6 +589,8 @@ Guidelines:
 
   // 3. Dynamic Interactive Fallback Engine
   const q = question.toLowerCase();
+  const isSymptomatic = q.includes('cramp') || q.includes('pain') || q.includes('bleed') || q.includes('discharge') || q.includes('white') || q.includes('cyst') || q.includes('delay') || q.includes('hair');
+  const bookingToken = isSymptomatic ? '\n\n[RECOMMEND_BOOKING]' : '';
 
   if (q.includes('discharge') || q.includes('white') || q.includes('fluid') || q.includes('wet')) {
     return `Vaginal discharge is a completely natural and vital function of reproductive health! Here is what your body might be telling you:
@@ -418,7 +599,7 @@ Guidelines:
 • **Milky White & Creamy**: Normal in the follicular or luteal phase, helping to lubricate tissues.
 • **Thick & Clumpy**: Could indicate a temporary yeast shift, especially if accompanied by itching.
 
-💡 *Interactive Tip*: Are you currently tracking your cycle phase? Log your symptoms daily to spot patterns easily!`;
+💡 *Interactive Tip*: Are you currently tracking your cycle phase? Log your symptoms daily to spot patterns easily!${bookingToken}`;
   }
 
   if (q.includes('pcos') || q.includes('pcod') || q.includes('cyst') || q.includes('delay') || q.includes('hair')) {
@@ -428,7 +609,7 @@ Guidelines:
 • **Spearmint Tea**: Drinking 2 cups daily helps balance androgen levels naturally.
 • **Pelvic Yoga**: Engaging in gentle hip-opening poses like Malasana improves ovarian blood flow.
 
-💡 *Interactive Question*: Would you like to check out our targeted **Yoga for PCOS** classes or request a personalized **Diet Plan**?`;
+💡 *Interactive Question*: Would you like to check out our targeted **Yoga for PCOS** classes or request a personalized **Diet Plan**?${bookingToken}`;
   }
 
   if (q.includes('cramp') || q.includes('pain') || q.includes('back') || q.includes('bleed')) {
@@ -438,7 +619,7 @@ Guidelines:
 • **Warm Herbal Infusions**: Ginger, chamomile, or cinnamon tea help relax uterine smooth muscle.
 • **Gentle Movement**: Child's Pose (Balasana) & Reclined Butterfly Pose relieve pelvic pressure.
 
-💡 *Interactive Question*: How many days into your cycle are you? If pain persists, Dr. Deepa Madhav is available for a direct consultation!`;
+💡 *Interactive Question*: How many days into your cycle are you? If pain persists, Dr. Deepa Madhav is available for a direct consultation!${bookingToken}`;
   }
 
   return `Thank you for asking! I'm here to guide you through your health & wellness journey:
@@ -447,5 +628,5 @@ Guidelines:
 • **Nurturing Habits**: Hydrating with 2.5L of warm water, practicing restorative pelvic yoga, and seed cycling provide strong baseline support.
 • **Personalized Care**: For specific medical evaluations, you can book a direct video consultation with **Dr. Deepa Madhav**!
 
-💡 *How else can I assist you today? Feel free to ask about period cramps, PCOS, diet tips, or yoga classes!*`;
+💡 *How else can I assist you today? Feel free to ask about period cramps, PCOS, diet tips, or yoga classes!*${bookingToken}`;
 }

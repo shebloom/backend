@@ -6,7 +6,7 @@ import { memoryCache } from '../lib/cache';
 export const appointmentsRouter = Router();
 
 /**
- * Helper to generate video room via Daily.co API or fallback
+ * Helper to generate video room via Daily.co API or verified clean Jitsi Meet WebRTC fallback
  */
 async function createVideoRoom(appointmentId: string): Promise<string> {
   const dailyApiKey = process.env.DAILY_API_KEY;
@@ -19,7 +19,8 @@ async function createVideoRoom(appointmentId: string): Promise<string> {
           Authorization: `Bearer ${dailyApiKey}`,
         },
         body: JSON.stringify({
-          name: `shebloom-consult-${appointmentId.substring(0, 8)}`,
+          name: `shebloomconsult${appointmentId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 12)}`,
+          privacy: 'public',
           properties: {
             enable_chat: true,
             start_video_off: false,
@@ -35,7 +36,9 @@ async function createVideoRoom(appointmentId: string): Promise<string> {
     }
   }
 
-  return `https://shebloom.daily.co/consult-${appointmentId.substring(0, 8)}`;
+  // Verified WebRTC room fallback (Jitsi Meet) requiring 0 API key setup with clean room name
+  const cleanHash = appointmentId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
+  return `https://meet.jit.si/SheBloomConsult${cleanHash}`;
 }
 
 /**
@@ -213,24 +216,41 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
     }
 
     const now = new Date();
-    const todayStr = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-    // Ensure all confirmed appointments have video room URLs
-    let formatted = (data || []).map((a: any) => ({
-      ...a,
-      consultation_type: 'video',
-      video_room_url: a.video_room_url || `https://shebloom.daily.co/consult-${a.id?.substring(0, 8) || 'room'}`,
-    }));
+    // Process appointments with 10-minute grace period enforcement
+    let formatted = (data || []).map((a: any) => {
+      const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
+      const [h, min] = (a.slot_time || '').split(':').map(Number);
+      const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
+      const graceEnd = new Date(scheduledDateTime.getTime() + 10 * 60 * 1000); // 10-minute grace period
+
+      const isTooEarly = now < scheduledDateTime;
+      const isJoinableWindow = now >= scheduledDateTime && now <= graceEnd;
+      const isPastGrace = now > graceEnd;
+
+      let displayStatus = a.status;
+      if (isPastGrace && ['confirmed', 'pending', 'rescheduled'].includes(a.status)) {
+        displayStatus = 'missed';
+        supabaseAdmin.from('appointments').update({ status: 'missed' }).eq('id', a.id).then();
+      }
+
+      return {
+        ...a,
+        status: displayStatus,
+        consultation_type: 'video',
+        video_room_url: a.video_room_url || `https://shebloom.daily.co/consult-${a.id?.substring(0, 8) || 'room'}`,
+        display_status: displayStatus,
+        is_too_early: isTooEarly,
+        is_joinable: isJoinableWindow,
+        is_past_grace: isPastGrace,
+        grace_seconds_remaining: isJoinableWindow ? Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000)) : 0,
+        can_reschedule: isPastGrace || ['missed', 'canceled'].includes(displayStatus),
+      };
+    });
 
     if (upcoming === 'true') {
       formatted = formatted.filter((a: any) => {
-        if (a.appointment_date === todayStr) {
-          const [h, m] = a.slot_time.split(':').map(Number);
-          const slotMinutes = h * 60 + (m || 0);
-          return slotMinutes > nowMinutes;
-        }
-        return true;
+        return (a.is_joinable || a.is_too_early) && ['confirmed', 'pending', 'rescheduled'].includes(a.display_status);
       });
     }
 
@@ -238,6 +258,152 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
   } catch (err) {
     console.error('Get appointments error:', err);
     res.status(500).json({ error: 'Failed to fetch appointments' });
+  }
+});
+
+/**
+ * GET /api/appointments/:id/join
+ * Join the video call for an appointment. Checks scheduled time and returns room details/token.
+ */
+appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const appointmentId = req.params.id;
+
+    // Fetch the appointment along with doctor and patient information
+    const { data: appointment, error: apptErr } = await supabaseAdmin
+      .from('appointments')
+      .select('*, doctors(*, users!inner(full_name)), users!appointments_patient_id_fkey(full_name)')
+      .eq('id', appointmentId)
+      .single();
+
+    if (apptErr || !appointment) {
+      res.status(404).json({ error: 'Appointment not found' });
+      return;
+    }
+
+    // Verify authorized party: patient or doctor of the appointment
+    const isPatient = req.userId === appointment.patient_id;
+    const isDoctor = req.userId === appointment.doctors?.user_id;
+
+    if (!isPatient && !isDoctor) {
+      res.status(403).json({ error: 'You are not authorized to join this call' });
+      return;
+    }
+
+    // 10-Minute Grace Window Validation
+    const apptDateStr = appointment.appointment_date; // YYYY-MM-DD
+    const [y, m, d] = apptDateStr.split('-').map(Number);
+    const [sh, sm] = appointment.slot_time.split(':').map(Number);
+
+    const now = new Date();
+    const scheduledStart = new Date(y, (m || 1) - 1, d || 1, sh || 0, sm || 0, 0, 0);
+    const graceEnd = new Date(scheduledStart.getTime() + 10 * 60 * 1000); // 10-minute grace window
+
+    // Condition A: Before scheduled start time
+    if (now < scheduledStart) {
+      const diffMs = scheduledStart.getTime() - now.getTime();
+      const diffSecs = Math.max(0, Math.floor(diffMs / 1000));
+      res.status(403).json({
+        error: `This consultation is scheduled to start at ${appointment.slot_time} on ${apptDateStr}. Access is gated until the scheduled time.`,
+        joinable: false,
+        reason: 'too_early',
+        scheduledTime: scheduledStart.toISOString(),
+        secondsRemaining: diffSecs,
+      });
+      return;
+    }
+
+    // Condition B: After 10-minute grace window has passed
+    if (now > graceEnd) {
+      // Auto-update appointment status in DB to 'missed' if still active
+      if (['confirmed', 'pending', 'rescheduled'].includes(appointment.status)) {
+        await supabaseAdmin
+          .from('appointments')
+          .update({ status: 'missed' })
+          .eq('id', appointmentId);
+      }
+
+      res.status(403).json({
+        error: 'The 10-minute join window for this consultation has expired. Please reschedule your appointment.',
+        joinable: false,
+        reason: 'expired',
+        status: 'missed',
+        canReschedule: true,
+      });
+      return;
+    }
+
+    // Condition C: Within active 10-minute grace window
+    const secondsRemainingInGraceWindow = Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000));
+
+    const cleanHash = appointment.id.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
+    let roomBaseUrl = appointment.video_room_url;
+
+    if (!roomBaseUrl || roomBaseUrl.includes('shebloom.daily.co') || roomBaseUrl.includes('#config')) {
+      roomBaseUrl = `https://meet.jit.si/SheBloomConsult${cleanHash}`;
+      supabaseAdmin.from('appointments').update({ video_room_url: roomBaseUrl }).eq('id', appointmentId).then();
+    }
+    const dailyApiKey = process.env.DAILY_API_KEY;
+
+    let joinUrl = roomBaseUrl;
+    let useSimulation = false;
+
+    if (dailyApiKey) {
+      try {
+        const userName = isDoctor
+          ? (appointment.doctors?.users?.full_name || 'Dr. Deeba')
+          : (appointment.users?.full_name || 'Patient');
+        const roomName = `shebloom-consult-${appointment.id.substring(0, 8)}`;
+
+        const tokenResponse = await fetch('https://api.daily.co/v1/meeting_tokens', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${dailyApiKey.trim()}`,
+          },
+          body: JSON.stringify({
+            properties: {
+              room_name: roomName,
+              is_owner: isDoctor,
+              user_name: userName,
+              exp: Math.floor(Date.now() / 1000) + 7200, // Token expires in 2 hours
+            },
+          }),
+        });
+
+        if (tokenResponse.ok) {
+          const tokenData = (await tokenResponse.json()) as any;
+          if (tokenData?.token) {
+            joinUrl = `${roomBaseUrl}?t=${tokenData.token}`;
+          }
+        } else {
+          const errText = await tokenResponse.text();
+          console.warn('Daily.co meeting token generation failed, falling back to basic URL:', errText);
+        }
+      } catch (err) {
+        console.error('Failed to create Daily.co meeting token:', err);
+      }
+    } else {
+      // Simulation/sandbox mode
+      useSimulation = true;
+    }
+
+    res.json({
+      joinable: true,
+      gracePeriodActive: true,
+      secondsRemainingInGraceWindow,
+      notice: 'Please join within 10 minutes or this consultation will need to be rescheduled.',
+      joinUrl,
+      useSimulation,
+      appointmentId: appointment.id,
+      patientId: appointment.patient_id,
+      doctorUserId: appointment.doctors?.user_id,
+      patientName: appointment.users?.full_name || 'Patient',
+      doctorName: appointment.doctors?.users?.full_name || 'Dr. Deeba',
+    });
+  } catch (err) {
+    console.error('Join appointment call error:', err);
+    res.status(500).json({ error: 'Failed to authorize call entry' });
   }
 });
 

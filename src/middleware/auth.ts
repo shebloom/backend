@@ -17,13 +17,18 @@ export async function requireAuth(
   next: NextFunction
 ): Promise<void> {
   const authHeader = req.headers.authorization;
+  let token = '';
 
-  if (!authHeader?.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Missing or invalid authorization header' });
-    return;
+  if (authHeader?.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  } else if (req.query.token && typeof req.query.token === 'string') {
+    token = req.query.token;
   }
 
-  const token = authHeader.split(' ')[1];
+  if (!token) {
+    res.status(401).json({ error: 'Missing or invalid authorization token' });
+    return;
+  }
 
   try {
     const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);

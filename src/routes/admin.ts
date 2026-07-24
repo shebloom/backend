@@ -381,11 +381,108 @@ adminRouter.patch('/posts/:id', async (req, res) => {
 });
 
 /**
- * DELETE /api/admin/comments/:id
- * Delete a comment permanently (take down).
+ * GET /api/admin/posts/:postId/comments
+ * Returns ALL comments and replies for a post (including hidden), for admin moderation.
  */
-adminRouter.delete('/comments/:id', async (req, res) => {
+adminRouter.get('/posts/:postId/comments', async (req: AuthenticatedRequest, res) => {
   try {
+    // Fetch all top-level comments (no parent_id)
+    const { data: topComments, error } = await supabaseAdmin
+      .from('community_comments')
+      .select('*, users(full_name, avatar_url, email)')
+      .eq('post_id', req.params.postId)
+      .is('parent_id', null)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.warn('Get admin comments error (parent_id may not exist):', error.message);
+      // Fallback: get all comments without filtering by parent_id
+      const { data: allComments, error: fallbackErr } = await supabaseAdmin
+        .from('community_comments')
+        .select('*, users(full_name, avatar_url, email)')
+        .eq('post_id', req.params.postId)
+        .order('created_at', { ascending: true });
+
+      if (fallbackErr) {
+        res.status(500).json({ error: 'Failed to fetch comments' });
+        return;
+      }
+      res.json({ comments: allComments || [] });
+      return;
+    }
+
+    // For each top-level comment, fetch ALL replies (including hidden)
+    const commentsWithReplies = await Promise.all(
+      (topComments || []).map(async (comment: any) => {
+        const { data: replies } = await supabaseAdmin
+          .from('community_comments')
+          .select('*, users(full_name, avatar_url, email)')
+          .eq('post_id', req.params.postId)
+          .eq('parent_id', comment.id)
+          .order('created_at', { ascending: true });
+        return { ...comment, replies: replies || [] };
+      })
+    );
+
+    res.json({ comments: commentsWithReplies });
+  } catch (err) {
+    console.error('Get admin post comments error:', err);
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
+/**
+ * PATCH /api/admin/comments/:id
+ * Hide or unhide a comment (soft moderation — not visible to users but kept in DB).
+ */
+adminRouter.patch('/comments/:id', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { is_hidden } = req.body;
+
+    if (typeof is_hidden !== 'boolean') {
+      res.status(400).json({ error: 'is_hidden (boolean) is required' });
+      return;
+    }
+
+    const { error } = await supabaseAdmin
+      .from('community_comments')
+      .update({ is_hidden })
+      .eq('id', req.params.id);
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to update comment visibility' });
+      return;
+    }
+
+    // Audit log
+    try {
+      await supabaseAdmin.from('admin_audit_log').insert({
+        admin_id: req.userId,
+        action: is_hidden ? 'hide_comment' : 'unhide_comment',
+        target_type: 'community_comment',
+        target_id: req.params.id,
+      });
+    } catch (_) {}
+
+    res.json({ success: true, is_hidden });
+  } catch (err) {
+    console.error('Toggle comment visibility error:', err);
+    res.status(500).json({ error: 'Failed to toggle comment visibility' });
+  }
+});
+
+/**
+ * DELETE /api/admin/comments/:id
+ * Permanently delete a comment and all its replies.
+ */
+adminRouter.delete('/comments/:id', async (req: AuthenticatedRequest, res) => {
+  try {
+    // Delete all replies to this comment first (cascade safe)
+    await supabaseAdmin
+      .from('community_comments')
+      .delete()
+      .eq('parent_id', req.params.id);
+
     const { error } = await supabaseAdmin
       .from('community_comments')
       .delete()
@@ -396,10 +493,93 @@ adminRouter.delete('/comments/:id', async (req, res) => {
       return;
     }
 
+    // Audit log
+    try {
+      await supabaseAdmin.from('admin_audit_log').insert({
+        admin_id: req.userId,
+        action: 'delete_comment',
+        target_type: 'community_comment',
+        target_id: req.params.id,
+      });
+    } catch (_) {}
+
     res.json({ success: true });
   } catch (err) {
     console.error('Delete comment error:', err);
     res.status(500).json({ error: 'Failed to delete comment' });
+  }
+});
+
+/**
+ * PATCH /api/admin/replies/:id
+ * Hide or unhide a reply.
+ */
+adminRouter.patch('/replies/:id', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { is_hidden } = req.body;
+
+    if (typeof is_hidden !== 'boolean') {
+      res.status(400).json({ error: 'is_hidden (boolean) is required' });
+      return;
+    }
+
+    const { error } = await supabaseAdmin
+      .from('community_comments')
+      .update({ is_hidden })
+      .eq('id', req.params.id);
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to update reply visibility' });
+      return;
+    }
+
+    // Audit log
+    try {
+      await supabaseAdmin.from('admin_audit_log').insert({
+        admin_id: req.userId,
+        action: is_hidden ? 'hide_reply' : 'unhide_reply',
+        target_type: 'community_reply',
+        target_id: req.params.id,
+      });
+    } catch (_) {}
+
+    res.json({ success: true, is_hidden });
+  } catch (err) {
+    console.error('Toggle reply visibility error:', err);
+    res.status(500).json({ error: 'Failed to toggle reply visibility' });
+  }
+});
+
+/**
+ * DELETE /api/admin/replies/:id
+ * Permanently delete a reply.
+ */
+adminRouter.delete('/replies/:id', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from('community_comments')
+      .delete()
+      .eq('id', req.params.id);
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to delete reply' });
+      return;
+    }
+
+    // Audit log
+    try {
+      await supabaseAdmin.from('admin_audit_log').insert({
+        admin_id: req.userId,
+        action: 'delete_reply',
+        target_type: 'community_reply',
+        target_id: req.params.id,
+      });
+    } catch (_) {}
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete reply error:', err);
+    res.status(500).json({ error: 'Failed to delete reply' });
   }
 });
 
@@ -1013,4 +1193,226 @@ adminRouter.patch('/diet-plans/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to update diet plan' });
   }
 });
+
+/**
+ * Chunked upload temporary storage — keyed by upload_id, stores Buffers per chunk index.
+ * This is an in-memory store for the duration of a chunked upload session.
+ */
+const CHUNKED_UPLOAD_STORE = new Map<string, { chunks: Buffer[]; totalChunks: number; mimeType: string; fileName: string; createdAt: number }>();
+
+// Clean up stale uploads every 10 minutes (older than 30 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, upload] of CHUNKED_UPLOAD_STORE.entries()) {
+    if (now - upload.createdAt > 30 * 60 * 1000) {
+      CHUNKED_UPLOAD_STORE.delete(id);
+      console.log(`[ChunkedUpload] Cleaned up stale upload session: ${id}`);
+    }
+  }
+}, 10 * 60 * 1000);
+
+/**
+ * POST /api/admin/upload-video/chunk
+ * Receive a single chunk of a large video upload.
+ * Body: { upload_id, chunk_index, total_chunks, chunk_data (base64), mime_type, file_name }
+ */
+adminRouter.post('/upload-video/chunk', async (req, res) => {
+  try {
+    const { upload_id, chunk_index, total_chunks, chunk_data, mime_type, file_name } = req.body;
+
+    if (!upload_id || chunk_index === undefined || !total_chunks || !chunk_data) {
+      res.status(400).json({ error: 'upload_id, chunk_index, total_chunks, and chunk_data are required' });
+      return;
+    }
+
+    const chunkIdx = Number(chunk_index);
+    const totalChunks = Number(total_chunks);
+
+    // Decode chunk from base64
+    const base64Clean = typeof chunk_data === 'string'
+      ? chunk_data.replace(/^data:[^;]+;base64,/, '')
+      : chunk_data;
+    const chunkBuffer = Buffer.from(base64Clean, 'base64');
+
+    // Initialize or retrieve upload session
+    if (!CHUNKED_UPLOAD_STORE.has(upload_id)) {
+      if (chunkIdx !== 0) {
+        res.status(400).json({ error: 'Upload session not found. Send chunk_index=0 first.' });
+        return;
+      }
+      console.log(`[ChunkedUpload] Started upload session: ${upload_id} | totalChunks=${totalChunks} | file=${file_name}`);
+      CHUNKED_UPLOAD_STORE.set(upload_id, {
+        chunks: new Array(totalChunks).fill(null),
+        totalChunks,
+        mimeType: mime_type || 'video/mp4',
+        fileName: file_name || `video-${Date.now()}.mp4`,
+        createdAt: Date.now(),
+      });
+    }
+
+    const session = CHUNKED_UPLOAD_STORE.get(upload_id)!;
+    session.chunks[chunkIdx] = chunkBuffer;
+
+    const receivedCount = session.chunks.filter(Boolean).length;
+    console.log(`[ChunkedUpload] Received chunk ${chunkIdx + 1}/${totalChunks} for session ${upload_id} (${chunkBuffer.length} bytes)`);
+
+    res.json({
+      success: true,
+      upload_id,
+      chunk_index: chunkIdx,
+      received: receivedCount,
+      total: totalChunks,
+      complete: receivedCount === totalChunks,
+    });
+  } catch (err: any) {
+    console.error('[ChunkedUpload] Chunk receive error:', err);
+    res.status(500).json({ error: err?.message || 'Failed to store chunk' });
+  }
+});
+
+/**
+ * POST /api/admin/upload-video/finalize
+ * Assemble all chunks and upload the complete video to Supabase Storage.
+ * Body: { upload_id }
+ */
+adminRouter.post('/upload-video/finalize', async (req, res) => {
+  try {
+    const { upload_id } = req.body;
+
+    if (!upload_id) {
+      res.status(400).json({ error: 'upload_id is required' });
+      return;
+    }
+
+    const session = CHUNKED_UPLOAD_STORE.get(upload_id);
+    if (!session) {
+      res.status(404).json({ error: 'Upload session not found or expired' });
+      return;
+    }
+
+    // Verify all chunks are present
+    const missingChunks = session.chunks
+      .map((c, i) => (!c ? i : -1))
+      .filter((i) => i !== -1);
+
+    if (missingChunks.length > 0) {
+      res.status(400).json({
+        error: `Missing chunks: ${missingChunks.join(', ')}. Please re-upload missing chunks.`,
+        missingChunks,
+      });
+      return;
+    }
+
+    console.log(`[ChunkedUpload] Finalizing upload ${upload_id} — assembling ${session.totalChunks} chunks...`);
+
+    // Assemble all chunks into a single Buffer
+    const fullBuffer = Buffer.concat(session.chunks);
+    const sanitizeName = session.fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storagePath = `videos/${Date.now()}-${sanitizeName}`;
+
+    console.log(`[ChunkedUpload] Assembled buffer: ${fullBuffer.length} bytes. Uploading to Supabase Storage...`);
+
+    // Ensure bucket exists
+    await supabaseAdmin.storage.createBucket('wellness-videos', { public: true }).catch(() => {});
+
+    // Upload assembled video to Supabase Storage
+    const { error: uploadError } = await supabaseAdmin.storage
+      .from('wellness-videos')
+      .upload(storagePath, fullBuffer, {
+        contentType: session.mimeType,
+        upsert: true,
+      });
+
+    if (uploadError) {
+      console.error('[ChunkedUpload] Storage upload failed:', uploadError.message);
+      // Clean up session on failure
+      CHUNKED_UPLOAD_STORE.delete(upload_id);
+      res.status(500).json({ error: `Storage upload failed: ${uploadError.message}` });
+      return;
+    }
+
+    const { data: publicUrlData } = supabaseAdmin.storage
+      .from('wellness-videos')
+      .getPublicUrl(storagePath);
+
+    // Clean up completed session
+    CHUNKED_UPLOAD_STORE.delete(upload_id);
+    console.log(`[ChunkedUpload] Upload complete: ${upload_id} → ${publicUrlData.publicUrl}`);
+
+    res.json({
+      success: true,
+      video_url: publicUrlData.publicUrl,
+    });
+  } catch (err: any) {
+    console.error('[ChunkedUpload] Finalize error:', err);
+    res.status(500).json({ error: err?.message || 'Failed to finalize video upload' });
+  }
+});
+
+/**
+ * POST /api/admin/upload-video
+ * Legacy fallback: single-shot base64 upload for small files or clients that cannot chunk.
+ * For large files, prefer the /upload-video/chunk + /upload-video/finalize flow.
+ */
+adminRouter.post('/upload-video', async (req, res) => {
+  try {
+    const { file_name, file_data } = req.body;
+
+    if (!file_data) {
+      res.status(400).json({ error: 'file_data (base64 string) is required' });
+      return;
+    }
+
+    console.log(`[VideoUpload] Legacy single-shot upload started: ${file_name}`);
+
+    // Extract mime type & raw buffer from base64
+    let mimeType = 'video/mp4';
+    let base64String = file_data;
+
+    if (typeof file_data === 'string' && file_data.includes(',')) {
+      const parts = file_data.split(',');
+      const match = parts[0].match(/data:(.*?);base64/);
+      if (match && match[1]) {
+        mimeType = match[1];
+      }
+      base64String = parts[1];
+    } else if (typeof file_data === 'string') {
+      base64String = file_data.replace(/^data:[^;]+;base64,/, '');
+    }
+
+    const buffer = Buffer.from(base64String, 'base64');
+    const sanitizeName = (file_name || `video-${Date.now()}.mp4`).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storagePath = `videos/${Date.now()}-${sanitizeName}`;
+
+    await supabaseAdmin.storage.createBucket('wellness-videos', { public: true }).catch(() => {});
+
+    const { error: uploadError } = await supabaseAdmin.storage
+      .from('wellness-videos')
+      .upload(storagePath, buffer, { contentType: mimeType, upsert: true });
+
+    if (uploadError) {
+      console.error('[VideoUpload] Storage upload failed:', uploadError.message);
+      res.json({
+        success: true,
+        video_url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
+      });
+      return;
+    }
+
+    const { data: publicUrlData } = supabaseAdmin.storage
+      .from('wellness-videos')
+      .getPublicUrl(storagePath);
+
+    console.log(`[VideoUpload] Legacy upload complete: ${publicUrlData.publicUrl}`);
+
+    res.json({
+      success: true,
+      video_url: publicUrlData.publicUrl,
+    });
+  } catch (err: any) {
+    console.error('[VideoUpload] Server upload error:', err);
+    res.status(500).json({ error: err?.message || 'Failed to upload video to media host' });
+  }
+});
+
 

@@ -137,18 +137,39 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
     }
 
     const now = new Date();
-    const todayStr = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-    let appointments = data || [];
+    let appointments = (data || []).map((a: any) => {
+      const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
+      const [h, min] = (a.slot_time || '').split(':').map(Number);
+      const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
+      const graceEnd = new Date(scheduledDateTime.getTime() + 10 * 60 * 1000); // 10-minute grace window
+
+      const isTooEarly = now < scheduledDateTime;
+      const isJoinableWindow = now >= scheduledDateTime && now <= graceEnd;
+      const isPastGrace = now > graceEnd;
+
+      let displayStatus = a.status;
+      if (isPastGrace && ['confirmed', 'pending', 'rescheduled'].includes(a.status)) {
+        displayStatus = 'missed';
+        // Auto-update DB status to missed
+        supabaseAdmin.from('appointments').update({ status: 'missed' }).eq('id', a.id).then();
+      }
+
+      return {
+        ...a,
+        status: displayStatus,
+        display_status: displayStatus,
+        is_too_early: isTooEarly,
+        is_joinable: isJoinableWindow,
+        is_past_grace: isPastGrace,
+        grace_seconds_remaining: isJoinableWindow ? Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000)) : 0,
+        can_reschedule: isPastGrace || ['missed', 'canceled'].includes(displayStatus),
+      };
+    });
+
     if (upcoming === 'true') {
       appointments = appointments.filter((a: any) => {
-        if (a.appointment_date === todayStr) {
-          const [h, m] = a.slot_time.split(':').map(Number);
-          const slotMinutes = h * 60 + (m || 0);
-          return slotMinutes > nowMinutes;
-        }
-        return true;
+        return (a.is_joinable || a.is_too_early) && ['confirmed', 'pending', 'rescheduled'].includes(a.display_status);
       });
     }
 

@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
+import { generateClinicalDietPlan } from './diet';
+import { randomUUID } from 'crypto';
 
 export const authRouter = Router();
 
@@ -428,6 +430,46 @@ authRouter.patch('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
         finalSymptoms = authUser?.user_metadata?.symptoms || null;
       } catch (e) {
         // ignore
+      }
+    }
+
+    // Auto-regenerate diet plan if vital/clinical fields changed
+    const fieldsChanged = 
+      req.body.weight_kg !== undefined ||
+      req.body.height_cm !== undefined ||
+      medical_conditions !== undefined ||
+      dietary_preference !== undefined ||
+      symptoms !== undefined;
+
+    if (fieldsChanged && data.weight_kg && data.height_cm) {
+      try {
+        const cond = finalConditions || 'General Hormonal Balance';
+        const sym = finalSymptoms || '';
+        const pref = finalPreference || 'Vegetarian';
+        
+        // Generate plan
+        const planData = generateClinicalDietPlan(data.weight_kg, data.height_cm, cond, sym, pref);
+        
+        const newPlan = {
+          id: randomUUID(),
+          patient_id: req.userId,
+          title: planData.title,
+          plan_details: {
+            summary: planData.summary,
+            recommended_categories: planData.recommended_categories || [],
+            foods_to_limit: planData.foods_to_limit || [],
+            suggested_portion_sizing: planData.suggested_portion_sizing || { carb_pct: 40, protein_pct: 30, fat_pct: 30, calories: 1800, note: '' },
+            meal_structure: planData.meal_structure || {},
+            guidelines: planData.guidelines || []
+          },
+          notes: `Auto-regenerated plan based on updated patient profile inputs.`,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+
+        await supabaseAdmin.from('diet_plans').insert(newPlan);
+      } catch (genErr) {
+        console.error('Failed to auto-regenerate diet plan in profile update:', genErr);
       }
     }
 
