@@ -334,14 +334,30 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
 
     // Verify authorized party: patient or doctor of the appointment
     const isPatient = req.userId === appointment.patient_id;
-    const isDoctor = req.userId === appointment.doctors?.user_id;
+    let isDoctor =
+      req.userId === appointment.doctors?.user_id ||
+      req.userId === appointment.doctor_id ||
+      req.userRole === 'doctor';
+
+    if (!isPatient && !isDoctor) {
+      // Direct doctor table query check
+      const { data: docRec } = await supabaseAdmin
+        .from('doctors')
+        .select('id, user_id')
+        .or(`id.eq.${appointment.doctor_id},user_id.eq.${req.userId}`)
+        .maybeSingle();
+
+      if (docRec && (docRec.user_id === req.userId || docRec.id === appointment.doctor_id)) {
+        isDoctor = true;
+      }
+    }
 
     if (!isPatient && !isDoctor) {
       res.status(403).json({ error: 'You are not authorized to join this call' });
       return;
     }
 
-    // 10-Minute Grace Window Validation
+    // 30-Minute Window Validation
     const apptDateStr = appointment.appointment_date; // YYYY-MM-DD
     const [y, m, d] = apptDateStr.split('-').map(Number);
     const [sh, sm] = appointment.slot_time.split(':').map(Number);
@@ -354,10 +370,10 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
     if (now < scheduledStart) {
       const diffMs = scheduledStart.getTime() - now.getTime();
       const diffSecs = Math.max(0, Math.floor(diffMs / 1000));
-      res.status(403).json({
-        error: `This consultation is scheduled to start at ${appointment.slot_time} on ${apptDateStr}. Access is gated until the scheduled time.`,
+      res.json({
         joinable: false,
         reason: 'too_early',
+        error: `This consultation is scheduled to start at ${appointment.slot_time} on ${apptDateStr}. Access opens at the scheduled time.`,
         scheduledTime: scheduledStart.toISOString(),
         secondsRemaining: diffSecs,
       });
@@ -374,10 +390,10 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
           .eq('id', appointmentId);
       }
 
-      res.status(403).json({
-        error: 'The 30-minute join window for this consultation has expired. Please reschedule your appointment.',
+      res.json({
         joinable: false,
         reason: 'expired',
+        error: 'The 30-minute join window for this consultation has expired. Please reschedule your appointment.',
         status: 'missed',
         canReschedule: true,
       });
