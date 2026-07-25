@@ -408,26 +408,72 @@ healthRouter.post('/prescriptions', requireAuth, requireRole('doctor'), async (r
 });
 
 /**
+ * GET /api/health-records/prescriptions
+ * Returns a list of prescriptions.
+ * Patients receive their own prescriptions.
+ * Doctors can supply ?patient_id=... to view a patient's prescriptions.
+ */
+healthRouter.get('/prescriptions', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const targetUserId = (req.userRole === 'doctor' || req.userRole === 'admin') && req.query.patient_id 
+      ? (req.query.patient_id as string)
+      : req.userId;
+
+    const { data: prescriptions, error } = await supabaseAdmin
+      .from('health_records')
+      .select('*')
+      .eq('user_id', targetUserId)
+      .eq('record_type', 'Prescription')
+      .order('record_date', { ascending: false });
+
+    if (error) {
+      console.error('Fetch prescriptions error:', error);
+      res.status(500).json({ error: 'Failed to fetch prescriptions' });
+      return;
+    }
+
+    res.json({ prescriptions: prescriptions || [] });
+  } catch (err) {
+    console.error('Get prescriptions error:', err);
+    res.status(500).json({ error: 'Failed to fetch prescriptions' });
+  }
+});
+
+/**
  * GET /api/health-records/documents/:patientId/:filename
  * Secure document download route. Authenticates user and checks privileges.
  */
 healthRouter.get('/documents/:patientId/:filename', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { patientId, filename } = req.params;
+    const patientId = req.params.patientId as string;
+    const filename = req.params.filename as string;
 
     // Enforce role and user matching rules
     const isSelf = req.userId === patientId;
-    const isDoctor = req.userRole === 'doctor';
+    const isDoctor = req.userRole === 'doctor' || req.userRole === 'admin';
 
     if (!isSelf && !isDoctor) {
       res.status(403).json({ error: 'You are not authorized to view this document' });
       return;
     }
 
-    const path = `${patientId}/${filename}`;
-    const { data, error } = await supabaseAdmin.storage
+    // Try path 1: patientId/filename
+    let path = `${patientId}/${filename}`;
+    let { data, error } = await supabaseAdmin.storage
       .from('health-records')
       .download(path);
+
+    // Fallback path 2: direct filename
+    if (error || !data) {
+      const fallbackPath = filename;
+      const { data: fbData, error: fbError } = await supabaseAdmin.storage
+        .from('health-records')
+        .download(fallbackPath);
+      if (!fbError && fbData) {
+        data = fbData;
+        error = null;
+      }
+    }
 
     if (error || !data) {
       console.error('Storage download error:', error);
@@ -449,14 +495,23 @@ healthRouter.get('/documents/:patientId/:filename', requireAuth, async (req: Aut
 healthRouter.get('/documents/:filename', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const filename = req.params.filename as string;
-    let path: string = filename;
-    if (!path.includes('/')) {
-      path = `${req.userId}/${filename}`;
-    }
-
-    const { data, error } = await supabaseAdmin.storage
+    
+    // Try path 1: req.userId/filename
+    let path = `${req.userId}/${filename}`;
+    let { data, error } = await supabaseAdmin.storage
       .from('health-records')
       .download(path);
+
+    // Fallback path 2: direct filename
+    if (error || !data) {
+      const { data: fbData, error: fbError } = await supabaseAdmin.storage
+        .from('health-records')
+        .download(filename);
+      if (!fbError && fbData) {
+        data = fbData;
+        error = null;
+      }
+    }
 
     if (error || !data) {
       console.error('Storage download error:', error);

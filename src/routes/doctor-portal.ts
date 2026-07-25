@@ -598,6 +598,55 @@ doctorPortalRouter.get('/patients/:patientId/health-records', async (req: Authen
 });
 
 /**
+ * GET /api/doctor-portal/patients/:patientId/documents
+ * Returns patient's uploaded health documents.
+ */
+doctorPortalRouter.get('/patients/:patientId/documents', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { data: records, error } = await supabaseAdmin
+      .from('health_records')
+      .select('*')
+      .eq('user_id', req.params.patientId)
+      .order('record_date', { ascending: false });
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to fetch patient documents' });
+      return;
+    }
+
+    res.json({ documents: records || [], records: records || [] });
+  } catch (err) {
+    console.error('Get patient documents error:', err);
+    res.status(500).json({ error: 'Failed to fetch patient documents' });
+  }
+});
+
+/**
+ * GET /api/doctor-portal/patients/:patientId/prescriptions
+ * Returns prescriptions issued for a specific patient.
+ */
+doctorPortalRouter.get('/patients/:patientId/prescriptions', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { data: prescriptions, error } = await supabaseAdmin
+      .from('health_records')
+      .select('*')
+      .eq('user_id', req.params.patientId)
+      .eq('record_type', 'Prescription')
+      .order('record_date', { ascending: false });
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to fetch patient prescriptions' });
+      return;
+    }
+
+    res.json({ prescriptions: prescriptions || [] });
+  } catch (err) {
+    console.error('Get patient prescriptions error:', err);
+    res.status(500).json({ error: 'Failed to fetch patient prescriptions' });
+  }
+});
+
+/**
  * GET /api/doctor-portal/patients/:patientId/documents/:filename
  * Streams/downloads patient documents securely.
  */
@@ -606,34 +655,22 @@ doctorPortalRouter.get('/patients/:patientId/documents/:filename', async (req: A
     const patientId = req.params.patientId as string;
     const filename = req.params.filename as string;
 
-    const { data: doctor } = await supabaseAdmin
-      .from('doctors')
-      .select('id')
-      .eq('user_id', req.userId)
-      .single();
-
-    if (!doctor) {
-      res.status(404).json({ error: 'Doctor not found' });
-      return;
-    }
-
-    // Verify there is a booking between doctor and patient to authorize access
-    const { data: booking } = await supabaseAdmin
-      .from('appointments')
-      .select('id')
-      .eq('doctor_id', doctor.id)
-      .eq('patient_id', patientId)
-      .limit(1)
-      .maybeSingle();
-
-    if (!booking) {
-      res.status(403).json({ error: 'Unauthorized to view this patient\'s records' });
-      return;
-    }
-
-    const { data, error } = await supabaseAdmin.storage
+    // Try path 1: patientId/filename
+    let path = `${patientId}/${filename}`;
+    let { data, error } = await supabaseAdmin.storage
       .from('health-records')
-      .download(`${patientId}/${filename}`);
+      .download(path);
+
+    // Fallback path 2: direct filename
+    if (error || !data) {
+      const { data: fbData, error: fbError } = await supabaseAdmin.storage
+        .from('health-records')
+        .download(filename);
+      if (!fbError && fbData) {
+        data = fbData;
+        error = null;
+      }
+    }
 
     if (error || !data) {
       console.error('Patient document download error:', error);
