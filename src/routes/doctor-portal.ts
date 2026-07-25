@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../middleware/auth';
+import { CONSULTATION_JOIN_WINDOW_MS } from '../lib/constants';
 
 export const doctorPortalRouter = Router();
 
@@ -143,7 +144,7 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
       const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
       const [h, min] = (a.slot_time || '').split(':').map(Number);
       const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
-      const graceEnd = new Date(scheduledDateTime.getTime() + 30 * 60 * 1000); // Full 30-minute booking window
+      const graceEnd = new Date(scheduledDateTime.getTime() + CONSULTATION_JOIN_WINDOW_MS);
 
       const isTooEarly = now < scheduledDateTime;
       const isJoinableWindow = now >= scheduledDateTime && now <= graceEnd;

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { memoryCache } from '../lib/cache';
+import { CONSULTATION_JOIN_WINDOW_MS, CONSULTATION_JOIN_WINDOW_MINUTES } from '../lib/constants';
 
 export const appointmentsRouter = Router();
 
@@ -273,7 +274,7 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
       const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
       const [h, min] = (a.slot_time || '').split(':').map(Number);
       const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
-      const graceEnd = new Date(scheduledDateTime.getTime() + 30 * 60 * 1000); // 30-minute booking window
+      const graceEnd = new Date(scheduledDateTime.getTime() + CONSULTATION_JOIN_WINDOW_MS);
 
       const isTooEarly = now < scheduledDateTime;
       const isJoinableWindow = now >= scheduledDateTime && now <= graceEnd;
@@ -374,7 +375,7 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
     const [y, m, d] = (apptDateStr || '').split('-').map(Number);
     const [sh, sm] = (appointment.slot_time || '').split(':').map(Number);
     const scheduledStart = new Date(y, (m || 1) - 1, d || 1, sh || 0, sm || 0, 0, 0);
-    const graceEnd = new Date(scheduledStart.getTime() + 30 * 60 * 1000);
+    const graceEnd = new Date(scheduledStart.getTime() + CONSULTATION_JOIN_WINDOW_MS);
     const secondsRemainingInGraceWindow = Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000));
 
     // Condition C: Within active window — Mark as completed since call is attended
