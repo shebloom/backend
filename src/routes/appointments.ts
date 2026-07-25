@@ -373,18 +373,54 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
     const now = new Date();
     const scheduledStart = parseAppointmentTimeAsIST(appointment.appointment_date, appointment.slot_time);
     const graceEnd = new Date(scheduledStart.getTime() + CONSULTATION_JOIN_WINDOW_MS);
-    const secondsRemainingInGraceWindow = Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000));
+
+    // ── BOTH BOUNDARIES: is_joinable = (now >= scheduledStart) AND (now <= graceEnd) ──
+    const isTooEarly   = now < scheduledStart;
+    const isJoinable   = now >= scheduledStart && now <= graceEnd;
+    const isPastGrace  = now > graceEnd;
+    const secondsRemainingInGraceWindow = isJoinable
+      ? Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000))
+      : 0;
 
     // ── DEBUG LOGGING ──────────────────────────────────────────────────────────────────────────
     console.log(`[JOIN] appointmentId=${appointmentId}`);
     console.log(`[JOIN] appointment_date=${appointment.appointment_date} slot_time=${appointment.slot_time}`);
     console.log(`[JOIN] scheduledStart (UTC): ${scheduledStart.toISOString()}`);
-    console.log(`[JOIN] now          (UTC): ${now.toISOString()}`);
-    console.log(`[JOIN] graceEnd     (UTC): ${graceEnd.toISOString()}`);
-    console.log(`[JOIN] isTooEarly=${now < scheduledStart} | isJoinable=${now >= scheduledStart && now <= graceEnd} | isPastGrace=${now > graceEnd}`);
+    console.log(`[JOIN] now            (UTC): ${now.toISOString()}`);
+    console.log(`[JOIN] graceEnd       (UTC): ${graceEnd.toISOString()}`);
+    console.log(`[JOIN] isTooEarly=${isTooEarly} | isJoinable=${isJoinable} | isPastGrace=${isPastGrace}`);
     // ──────────────────────────────────────────────────────────────────────────────────────────
 
-    // Condition C: Within active window — Mark as completed since call is attended
+    // ── START BOUNDARY: block early joins server-side, no exception ──
+    if (isTooEarly) {
+      const minutesUntilStart = Math.ceil((scheduledStart.getTime() - now.getTime()) / 60000);
+      res.json({
+        joinable: false,
+        reason: 'too_early',
+        error: `This consultation starts in ${minutesUntilStart} minute${minutesUntilStart !== 1 ? 's' : ''}. You cannot join before the scheduled time.`,
+        scheduledStart: scheduledStart.toISOString(),
+        minutesUntilStart,
+      });
+      return;
+    }
+
+    // ── END BOUNDARY: block joins after the grace window has expired ──
+    if (isPastGrace) {
+      // Auto-mark as missed if it wasn't already
+      if (['confirmed', 'pending', 'rescheduled'].includes(appointment.status)) {
+        await supabaseAdmin.from('appointments').update({ status: 'missed' }).eq('id', appointmentId);
+      }
+      res.json({
+        joinable: false,
+        reason: 'expired',
+        error: `The ${CONSULTATION_JOIN_WINDOW_MINUTES}-minute join window for this consultation has expired. Please reschedule.`,
+        expiredAt: graceEnd.toISOString(),
+      });
+      return;
+    }
+
+    // ── WITHIN ACTIVE WINDOW (now >= scheduledStart && now <= graceEnd) ──
+    // Mark as completed only when someone actually joins inside the window
     await supabaseAdmin
       .from('appointments')
       .update({ status: 'completed' })
@@ -446,7 +482,7 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       joinable: true,
       gracePeriodActive: true,
       secondsRemainingInGraceWindow,
-      notice: 'Please join within 10 minutes or this consultation will need to be rescheduled.',
+      notice: `Please join within ${CONSULTATION_JOIN_WINDOW_MINUTES} minutes of your scheduled time or this consultation will need to be rescheduled.`,
       joinUrl,
       useSimulation,
       appointmentId: appointment.id,
