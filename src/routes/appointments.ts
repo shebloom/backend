@@ -357,56 +357,31 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       return;
     }
 
-    // 30-Minute Window Validation
-    const apptDateStr = appointment.appointment_date; // YYYY-MM-DD
-    const [y, m, d] = apptDateStr.split('-').map(Number);
-    const [sh, sm] = appointment.slot_time.split(':').map(Number);
+    // Validate appointment status (must be active: confirmed, pending, or rescheduled)
+    const isActiveStatus = ['confirmed', 'pending', 'rescheduled'].includes(appointment.status);
 
+    if (!isActiveStatus) {
+      res.json({
+        joinable: false,
+        reason: 'inactive',
+        error: `This appointment status is '${appointment.status}'. Only active appointments can be joined.`,
+      });
+      return;
+    }
+
+    const apptDateStr = appointment.appointment_date;
     const now = new Date();
+    const [y, m, d] = (apptDateStr || '').split('-').map(Number);
+    const [sh, sm] = (appointment.slot_time || '').split(':').map(Number);
     const scheduledStart = new Date(y, (m || 1) - 1, d || 1, sh || 0, sm || 0, 0, 0);
-    const graceEnd = new Date(scheduledStart.getTime() + 30 * 60 * 1000); // Full 30-minute booking window
+    const graceEnd = new Date(scheduledStart.getTime() + 30 * 60 * 1000);
+    const secondsRemainingInGraceWindow = Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000));
 
-    // Condition A: Before scheduled start time
-    if (now < scheduledStart) {
-      const diffMs = scheduledStart.getTime() - now.getTime();
-      const diffSecs = Math.max(0, Math.floor(diffMs / 1000));
-      res.json({
-        joinable: false,
-        reason: 'too_early',
-        error: `This consultation is scheduled to start at ${appointment.slot_time} on ${apptDateStr}. Access opens at the scheduled time.`,
-        scheduledTime: scheduledStart.toISOString(),
-        secondsRemaining: diffSecs,
-      });
-      return;
-    }
-
-    // Condition B: After 30-minute booking window has passed
-    if (now > graceEnd) {
-      // Auto-update appointment status in DB to 'missed' if still active
-      if (['confirmed', 'pending', 'rescheduled'].includes(appointment.status)) {
-        await supabaseAdmin
-          .from('appointments')
-          .update({ status: 'missed' })
-          .eq('id', appointmentId);
-      }
-
-      res.json({
-        joinable: false,
-        reason: 'expired',
-        error: 'The 30-minute join window for this consultation has expired. Please reschedule your appointment.',
-        status: 'missed',
-        canReschedule: true,
-      });
-      return;
-    }
-
-    // Condition C: Within active 10-minute grace window — Mark as completed since call is attended
+    // Condition C: Within active window — Mark as completed since call is attended
     await supabaseAdmin
       .from('appointments')
       .update({ status: 'completed' })
       .eq('id', appointmentId);
-
-    const secondsRemainingInGraceWindow = Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000));
 
     const cleanHash = appointment.id.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
     let roomBaseUrl = appointment.video_room_url;
