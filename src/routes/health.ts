@@ -488,8 +488,12 @@ healthRouter.get('/documents/:patientId/:filename', requireAuth, async (req: Aut
     }
 
     if (error || !data) {
-      console.error('Storage download error:', error);
-      res.status(404).json({ error: 'Document not found' });
+      console.warn('Storage download notice (file missing in bucket):', error?.message || 'Not found');
+      res.status(404).json({
+        error: 'This file is no longer available',
+        message: 'This document was stored on a temporary server disk prior to cloud storage migration and is no longer available. Please re-upload your report.',
+        code: 'FILE_NO_LONGER_AVAILABLE',
+      });
       return;
     }
 
@@ -526,8 +530,12 @@ healthRouter.get('/documents/:filename', requireAuth, async (req: AuthenticatedR
     }
 
     if (error || !data) {
-      console.error('Storage download error:', error);
-      res.status(404).json({ error: 'Document not found' });
+      console.warn('Storage download notice (file missing in bucket):', error?.message || 'Not found');
+      res.status(404).json({
+        error: 'This file is no longer available',
+        message: 'This document was stored on a temporary server disk prior to cloud storage migration and is no longer available. Please re-upload your report.',
+        code: 'FILE_NO_LONGER_AVAILABLE',
+      });
       return;
     }
 

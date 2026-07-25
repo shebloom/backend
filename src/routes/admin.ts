@@ -1,9 +1,8 @@
 import { Router } from 'express';
-import fs from 'fs';
-import path from 'path';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../middleware/auth';
 import { randomUUID } from 'crypto';
+import { uploadVideoBufferToCloudinary } from '../lib/cloudinary';
 
 export const adminRouter = Router();
 
@@ -1343,7 +1342,20 @@ adminRouter.post('/upload-video/finalize', async (req, res) => {
       .updateBucket('wellness-videos', { public: true, fileSizeLimit: 1073741824 })
       .catch(() => {});
 
-    // Upload assembled video to Supabase Storage
+    // Strategy 1: Attempt direct server-side upload to Cloudinary
+    try {
+      const cloudinaryUrl = await uploadVideoBufferToCloudinary(fullBuffer, sanitizeName, session.mimeType);
+      CHUNKED_UPLOAD_STORE.delete(upload_id);
+      res.json({
+        success: true,
+        video_url: cloudinaryUrl,
+      });
+      return;
+    } catch (cErr: any) {
+      console.warn('[ChunkedUpload] Cloudinary upload notice:', cErr?.message || cErr);
+    }
+
+    // Strategy 2: Upload assembled video to Supabase Storage bucket 'wellness-videos'
     const { error: uploadError } = await supabaseAdmin.storage
       .from('wellness-videos')
       .upload(storagePath, fullBuffer, {
@@ -1352,41 +1364,16 @@ adminRouter.post('/upload-video/finalize', async (req, res) => {
       });
 
     if (uploadError) {
-      console.warn('[ChunkedUpload] Supabase Storage upload failed or exceeded size limit:', uploadError.message);
-
-      try {
-        const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'videos');
-        if (!fs.existsSync(uploadDir)) {
-          fs.mkdirSync(uploadDir, { recursive: true });
-        }
-        const fileBasename = `${Date.now()}-${sanitizeName}`;
-        const localFilePath = path.join(uploadDir, fileBasename);
-        fs.writeFileSync(localFilePath, fullBuffer);
-
-        const protocol = req.protocol || 'http';
-        const host = req.get('host') || 'localhost:4000';
-        const localVideoUrl = `${protocol}://${host}/api/uploads/videos/${fileBasename}`;
-
-        CHUNKED_UPLOAD_STORE.delete(upload_id);
-
-        res.json({
-          success: true,
-          video_url: localVideoUrl,
-        });
-        return;
-      } catch (diskErr: any) {
-        console.error('[ChunkedUpload] Disk fallback also failed:', diskErr);
-        CHUNKED_UPLOAD_STORE.delete(upload_id);
-        res.status(500).json({ error: `Storage upload failed: ${uploadError.message}` });
-        return;
-      }
+      console.error('[ChunkedUpload] Storage upload error:', uploadError.message);
+      CHUNKED_UPLOAD_STORE.delete(upload_id);
+      res.status(500).json({ error: `Video cloud storage upload failed: ${uploadError.message}` });
+      return;
     }
 
     const { data: publicUrlData } = supabaseAdmin.storage
       .from('wellness-videos')
       .getPublicUrl(storagePath);
 
-    // Clean up completed session
     CHUNKED_UPLOAD_STORE.delete(upload_id);
 
     res.json({
@@ -1402,7 +1389,6 @@ adminRouter.post('/upload-video/finalize', async (req, res) => {
 /**
  * POST /api/admin/upload-video
  * Legacy fallback: single-shot base64 upload for small files or clients that cannot chunk.
- * For large files, prefer the /upload-video/chunk + /upload-video/finalize flow.
  */
 adminRouter.post('/upload-video', async (req, res) => {
   try {
@@ -1413,7 +1399,6 @@ adminRouter.post('/upload-video', async (req, res) => {
       return;
     }
 
-    // Extract mime type & raw buffer from base64
     let mimeType = 'video/mp4';
     let base64String = file_data;
 
@@ -1432,11 +1417,21 @@ adminRouter.post('/upload-video', async (req, res) => {
     const sanitizeName = (file_name || `video-${Date.now()}.mp4`).replace(/[^a-zA-Z0-9._-]/g, '_');
     const storagePath = `videos/${Date.now()}-${sanitizeName}`;
 
+    // Strategy 1: Cloudinary
+    try {
+      const cloudinaryUrl = await uploadVideoBufferToCloudinary(buffer, sanitizeName, mimeType);
+      res.json({
+        success: true,
+        video_url: cloudinaryUrl,
+      });
+      return;
+    } catch (cErr: any) {
+      console.warn('[VideoUpload] Cloudinary upload notice:', cErr?.message || cErr);
+    }
+
+    // Strategy 2: Supabase Storage
     await supabaseAdmin.storage
       .createBucket('wellness-videos', { public: true, fileSizeLimit: 1073741824 })
-      .catch(() => {});
-    await supabaseAdmin.storage
-      .updateBucket('wellness-videos', { public: true, fileSizeLimit: 1073741824 })
       .catch(() => {});
 
     const { error: uploadError } = await supabaseAdmin.storage
@@ -1444,30 +1439,9 @@ adminRouter.post('/upload-video', async (req, res) => {
       .upload(storagePath, buffer, { contentType: mimeType, upsert: true });
 
     if (uploadError) {
-      console.warn('[VideoUpload] Supabase Storage upload failed or exceeded size limit:', uploadError.message);
-      try {
-        const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'videos');
-        if (!fs.existsSync(uploadDir)) {
-          fs.mkdirSync(uploadDir, { recursive: true });
-        }
-        const fileBasename = `${Date.now()}-${sanitizeName}`;
-        const localFilePath = path.join(uploadDir, fileBasename);
-        fs.writeFileSync(localFilePath, buffer);
-
-        const protocol = req.protocol || 'http';
-        const host = req.get('host') || 'localhost:4000';
-        const localVideoUrl = `${protocol}://${host}/api/uploads/videos/${fileBasename}`;
-
-        res.json({
-          success: true,
-          video_url: localVideoUrl,
-        });
-        return;
-      } catch (diskErr: any) {
-        console.error('[VideoUpload] Disk fallback error:', diskErr);
-        res.status(500).json({ error: `Storage upload failed: ${uploadError.message}` });
-        return;
-      }
+      console.error('[VideoUpload] Storage error:', uploadError.message);
+      res.status(500).json({ error: `Video cloud storage upload failed: ${uploadError.message}` });
+      return;
     }
 
     const { data: publicUrlData } = supabaseAdmin.storage
@@ -1478,14 +1452,9 @@ adminRouter.post('/upload-video', async (req, res) => {
       success: true,
       video_url: publicUrlData.publicUrl,
     });
-
-    res.json({
-      success: true,
-      video_url: publicUrlData.publicUrl,
-    });
   } catch (err: any) {
     console.error('[VideoUpload] Server upload error:', err);
-    res.status(500).json({ error: err?.message || 'Failed to upload video to media host' });
+    res.status(500).json({ error: err?.message || 'Failed to upload video' });
   }
 });
 

@@ -43,19 +43,6 @@ app.use(
   })
 );
 
-import path from 'path';
-
-// ─── Static Files Serving (with CORS and Cross-Origin Resource Policy for Videos) ───
-app.use(
-  '/api/uploads',
-  (_req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    next();
-  },
-  express.static(path.join(process.cwd(), 'public', 'uploads'))
-);
-
 // ─── Health check ───────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

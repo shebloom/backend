@@ -233,6 +233,7 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
 
     const nowIso = new Date().toISOString();
     const newDietPlan: any = {
+      id: randomUUID(),
       patient_id,
       doctor_id: req.userId,
       source: 'doctor',
@@ -247,15 +248,25 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
       updated_at: nowIso,
     };
 
+    let hasValidAppt = false;
     const validApptId = appointment_id && appointment_id !== '00000000-0000-0000-0000-000000000000';
     if (validApptId) {
-      newDietPlan.appointment_id = appointment_id;
+      const { data: checkAppt } = await supabaseAdmin
+        .from('appointments')
+        .select('id')
+        .eq('id', appointment_id)
+        .maybeSingle();
+
+      if (checkAppt) {
+        newDietPlan.appointment_id = appointment_id;
+        hasValidAppt = true;
+      }
     }
 
     let data: any;
     let error: any;
 
-    if (validApptId) {
+    if (hasValidAppt) {
       const result = await supabaseAdmin
         .from('diet_plans')
         .upsert(newDietPlan, { onConflict: 'appointment_id' })
@@ -264,7 +275,6 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
       data = result.data;
       error = result.error;
     } else {
-      // Check if an existing plan exists for this patient to update or insert
       const { data: existing } = await supabaseAdmin
         .from('diet_plans')
         .select('id')
@@ -302,8 +312,11 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
     }
 
     if (error) {
-      console.error('Insert/Update diet plan error:', error);
-      res.status(500).json({ error: 'Failed to save diet plan to database' });
+      console.error('[diet-attach] Insert/Update diet plan DB error:', error.message, error.details, error.hint);
+      res.status(400).json({
+        error: 'Failed to save diet plan to database',
+        details: error.message || String(error),
+      });
       return;
     }
 
