@@ -301,7 +301,8 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
 
     if (upcoming === 'true') {
       formatted = formatted.filter((a: any) => {
-        return (a.is_joinable || a.is_too_early) && ['confirmed', 'pending', 'rescheduled'].includes(a.display_status);
+        // Include 'completed' so already-joined appointments remain joinable during the window
+        return (a.is_joinable || a.is_too_early) && ['confirmed', 'pending', 'rescheduled', 'completed'].includes(a.display_status);
       });
     }
 
@@ -357,8 +358,9 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       return;
     }
 
-    // Validate appointment status (must be active: confirmed, pending, or rescheduled)
-    const isActiveStatus = ['confirmed', 'pending', 'rescheduled'].includes(appointment.status);
+    // Validate appointment status — allow joining active appointments AND already-in-progress ones
+    // 'completed' is included here because the join endpoint sets it prematurely (kept for idempotency)
+    const isActiveStatus = ['confirmed', 'pending', 'rescheduled', 'completed'].includes(appointment.status);
 
     if (!isActiveStatus) {
       res.json({
@@ -420,18 +422,18 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
     }
 
     // ── WITHIN ACTIVE WINDOW (now >= scheduledStart && now <= graceEnd) ──
-    // Mark as completed only when someone actually joins inside the window
-    await supabaseAdmin
-      .from('appointments')
-      .update({ status: 'completed' })
-      .eq('id', appointmentId);
+    // NOTE: Do NOT update status to 'completed' here — that would immediately remove the
+    // appointment from the 'upcoming' list and the join window would vanish for both parties.
+    // Status transitions: confirmed/rescheduled → (stays active during window) → completed (post-call)
+    // The 'completed' write is intentionally deferred; it happens separately when the call ends.
 
     const cleanHash = appointment.id.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
     let roomBaseUrl = appointment.video_room_url;
 
     if (!roomBaseUrl || roomBaseUrl.includes('shebloom.daily.co') || roomBaseUrl.includes('#config')) {
       roomBaseUrl = `https://meet.jit.si/SheBloomConsult${cleanHash}`;
-      supabaseAdmin.from('appointments').update({ video_room_url: roomBaseUrl, status: 'completed' }).eq('id', appointmentId).then();
+      // Only update the room URL — do NOT touch status here
+      supabaseAdmin.from('appointments').update({ video_room_url: roomBaseUrl }).eq('id', appointmentId).then();
     }
     const dailyApiKey = process.env.DAILY_API_KEY;
 
