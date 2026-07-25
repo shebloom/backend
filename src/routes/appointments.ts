@@ -252,7 +252,7 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
     if (upcoming === 'true') {
       query = query
         .gte('appointment_date', new Date().toISOString().split('T')[0])
-        .in('status', ['confirmed', 'pending'])
+        .in('status', ['confirmed', 'pending', 'rescheduled', 'completed'])
         .order('appointment_date', { ascending: true })
         .order('slot_time', { ascending: true })
         .limit(5);

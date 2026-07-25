@@ -125,7 +125,7 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
     if (upcoming === 'true') {
       query = query
         .gte('appointment_date', new Date().toISOString().split('T')[0])
-        .in('status', ['confirmed', 'pending'])
+        .in('status', ['confirmed', 'pending', 'rescheduled', 'completed'])
         .order('appointment_date', { ascending: true });
     } else {
       query = query.order('appointment_date', { ascending: false });
@@ -170,7 +170,9 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
 
     if (upcoming === 'true') {
       appointments = appointments.filter((a: any) => {
-        return (a.is_joinable || a.is_too_early) && ['confirmed', 'pending', 'rescheduled'].includes(a.display_status);
+        // Include 'completed' so already-joined appointments remain visible for re-join during the window.
+        // Must match the same statuses as appointments.ts and the frontend getCallWindowState check.
+        return (a.is_joinable || a.is_too_early) && ['confirmed', 'pending', 'rescheduled', 'completed'].includes(a.display_status);
       });
     }
 
