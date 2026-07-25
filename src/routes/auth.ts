@@ -254,6 +254,8 @@ authRouter.post('/sync-profile', requireAuth, async (req: AuthenticatedRequest, 
   try {
     const { full_name, phone, date_of_birth } = req.body;
 
+    // IMPORTANT: Use ignoreDuplicates so an existing doctor/admin account's role
+    // is never overwritten back to 'patient' if this endpoint fires on re-login.
     const { data, error } = await supabaseAdmin
       .from('users')
       .upsert(
@@ -263,19 +265,32 @@ authRouter.post('/sync-profile', requireAuth, async (req: AuthenticatedRequest, 
           full_name: full_name || null,
           phone: phone || null,
           date_of_birth: date_of_birth || null,
-          role: 'patient',
+          role: 'patient', // Only applied on INSERT (new users) — not on UPDATE (ignoreDuplicates)
         },
-        { onConflict: 'id' }
+        { onConflict: 'id', ignoreDuplicates: true }
       )
       .select()
       .single();
 
     if (error) {
-      console.error('Profile sync error:', error);
-      res.status(500).json({ error: 'Failed to sync profile' });
+      // ignoreDuplicates returns null data on conflict — fetch the existing row
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from('users')
+        .select('*')
+        .eq('id', req.userId!)
+        .single();
+
+      if (fetchErr || !existing) {
+        console.error('Profile sync error — fetch fallback failed:', fetchErr);
+        res.status(500).json({ error: 'Failed to sync profile' });
+        return;
+      }
+
+      res.json({ user: existing });
       return;
     }
 
+    // New user row was inserted
     res.json({ user: data });
   } catch (err) {
     console.error('Profile sync error:', err);
@@ -303,6 +318,8 @@ authRouter.get('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
       const { data: { user: authUser } } = await supabaseAdmin.auth.admin.getUserById(req.userId!);
       const fullName = authUser?.user_metadata?.full_name || authUser?.user_metadata?.name || null;
 
+      // IMPORTANT: Use ignoreDuplicates so existing doctor/admin roles are never
+      // overwritten to 'patient'. This only inserts if the row truly doesn't exist.
       const { data: newUser, error: createError } = await supabaseAdmin
         .from('users')
         .upsert(
@@ -310,20 +327,31 @@ authRouter.get('/me', requireAuth, async (req: AuthenticatedRequest, res) => {
             id: req.userId,
             email: req.userEmail,
             full_name: fullName,
-            role: 'patient',
+            role: 'patient', // Only applied on fresh INSERT — not on UPDATE
           },
-          { onConflict: 'id' }
+          { onConflict: 'id', ignoreDuplicates: true }
         )
         .select()
         .single();
 
       if (createError || !newUser) {
-        console.error('Auto-provision user error:', createError);
-        res.status(404).json({ error: 'User not found' });
-        return;
-      }
+        // ignoreDuplicates returns null on conflict — try a plain SELECT
+        const { data: existing } = await supabaseAdmin
+          .from('users')
+          .select('*')
+          .eq('id', req.userId!)
+          .single();
 
-      data = newUser;
+        if (existing) {
+          data = existing;
+        } else {
+          console.error('Auto-provision user error:', createError);
+          res.status(404).json({ error: 'User not found' });
+          return;
+        }
+      } else {
+        data = newUser;
+      }
     }
 
     // Fetch authUser metadata to merge extra fields

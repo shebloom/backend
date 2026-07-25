@@ -24,18 +24,36 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // ─── Middleware ──────────────────────────────────────────────────────────────
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginEmbedderPolicy: false,
+  })
+);
 app.use(morgan('dev'));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.use(
   cors({
-    origin: (origin, callback) => {
+    origin: (_origin, callback) => {
       // Allow any origin dynamically to support Vercel preview branches
       callback(null, true);
     },
     credentials: true,
   })
+);
+
+import path from 'path';
+
+// ─── Static Files Serving (with CORS and Cross-Origin Resource Policy for Videos) ───
+app.use(
+  '/api/uploads',
+  (_req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    next();
+  },
+  express.static(path.join(process.cwd(), 'public', 'uploads'))
 );
 
 // ─── Health check ───────────────────────────────────────────────────────────
@@ -72,6 +90,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 import { startJobQueueWorker } from './lib/jobQueue';
 import { getOrCreateDrDeepa } from './routes/doctors';
+import { recalculateAllPostCommentCounts } from './routes/community';
 
 app.listen(PORT, () => {
   console.log(`🌸 SheBloom API running on http://localhost:${PORT}`);
@@ -79,6 +98,10 @@ app.listen(PORT, () => {
   getOrCreateDrDeepa()
     .then(() => console.log('✅ Dr. Deepa verified and seeded by default'))
     .catch((err) => console.error('Failed to seed Dr. Deepa:', err));
+  recalculateAllPostCommentCounts()
+    .then(() => console.log('✅ Community comment counts reconciled with DB rows'))
+    .catch((err) => console.error('Failed to reconcile comment counts:', err));
 });
 
 export default app;
+

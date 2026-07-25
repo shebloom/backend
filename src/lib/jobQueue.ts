@@ -75,15 +75,12 @@ async function processJob(jobId: string, jobType: JobType, payload: JobPayload) 
         break;
 
       case 'sync_external_video':
-        console.log(`[JobQueue] Synced external video ${payload.videoId}`);
         break;
 
       case 'generate_health_summary':
-        console.log(`[JobQueue] Generated health summary for patient ${payload.patientId}`);
         break;
 
       case 'cleanup_stale_slots':
-        console.log('[JobQueue] Cleaned up stale slot cache');
         break;
     }
 

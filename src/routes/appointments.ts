@@ -222,7 +222,7 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
       const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
       const [h, min] = (a.slot_time || '').split(':').map(Number);
       const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
-      const graceEnd = new Date(scheduledDateTime.getTime() + 10 * 60 * 1000); // 10-minute grace period
+      const graceEnd = new Date(scheduledDateTime.getTime() + 30 * 60 * 1000); // 30-minute booking window
 
       const isTooEarly = now < scheduledDateTime;
       const isJoinableWindow = now >= scheduledDateTime && now <= graceEnd;
@@ -297,7 +297,7 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
 
     const now = new Date();
     const scheduledStart = new Date(y, (m || 1) - 1, d || 1, sh || 0, sm || 0, 0, 0);
-    const graceEnd = new Date(scheduledStart.getTime() + 10 * 60 * 1000); // 10-minute grace window
+    const graceEnd = new Date(scheduledStart.getTime() + 30 * 60 * 1000); // Full 30-minute booking window
 
     // Condition A: Before scheduled start time
     if (now < scheduledStart) {
@@ -313,7 +313,7 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       return;
     }
 
-    // Condition B: After 10-minute grace window has passed
+    // Condition B: After 30-minute booking window has passed
     if (now > graceEnd) {
       // Auto-update appointment status in DB to 'missed' if still active
       if (['confirmed', 'pending', 'rescheduled'].includes(appointment.status)) {
@@ -324,7 +324,7 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       }
 
       res.status(403).json({
-        error: 'The 10-minute join window for this consultation has expired. Please reschedule your appointment.',
+        error: 'The 30-minute join window for this consultation has expired. Please reschedule your appointment.',
         joinable: false,
         reason: 'expired',
         status: 'missed',
@@ -333,7 +333,12 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       return;
     }
 
-    // Condition C: Within active 10-minute grace window
+    // Condition C: Within active 10-minute grace window — Mark as completed since call is attended
+    await supabaseAdmin
+      .from('appointments')
+      .update({ status: 'completed' })
+      .eq('id', appointmentId);
+
     const secondsRemainingInGraceWindow = Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000));
 
     const cleanHash = appointment.id.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
@@ -341,7 +346,7 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
 
     if (!roomBaseUrl || roomBaseUrl.includes('shebloom.daily.co') || roomBaseUrl.includes('#config')) {
       roomBaseUrl = `https://meet.jit.si/SheBloomConsult${cleanHash}`;
-      supabaseAdmin.from('appointments').update({ video_room_url: roomBaseUrl }).eq('id', appointmentId).then();
+      supabaseAdmin.from('appointments').update({ video_room_url: roomBaseUrl, status: 'completed' }).eq('id', appointmentId).then();
     }
     const dailyApiKey = process.env.DAILY_API_KEY;
 
@@ -594,7 +599,32 @@ appointmentsRouter.post('/:id/reschedule-accept', requireAuth, async (req: Authe
     res.json({ success: true, appointment: updatedAppt });
   } catch (err) {
     console.error('Reschedule accept error:', err);
-    res.status(500).json({ error: 'Failed to confirm reschedule' });
+    res.status(500).json({ error: 'Failed to accept reschedule request' });
   }
 });
 
+/**
+ * POST /api/appointments/:id/complete
+ * Manually mark an appointment as completed when consultation finishes.
+ */
+appointmentsRouter.post('/:id/complete', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const appointmentId = req.params.id;
+    const { data, error } = await supabaseAdmin
+      .from('appointments')
+      .update({ status: 'completed' })
+      .eq('id', appointmentId)
+      .select()
+      .single();
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to complete appointment' });
+      return;
+    }
+
+    res.json({ success: true, appointment: data });
+  } catch (err) {
+    console.error('Complete appointment error:', err);
+    res.status(500).json({ error: 'Failed to complete appointment' });
+  }
+});

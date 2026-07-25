@@ -48,8 +48,8 @@ membershipRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) =>
       plan_id: 'free_tier',
       status: 'active',
       current_period_end: expiryDate.toISOString(),
-      consultations_total: 3,
-      consultations_remaining: 3,
+      consultations_total: 12,
+      consultations_remaining: 12,
     };
 
     const { data: createdMemb, error: insertError } = await supabaseAdmin
@@ -66,8 +66,8 @@ membershipRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) =>
           plan: 'free_tier',
           status: 'active',
           current_period_end: expiryDate.toISOString(),
-          consultations_remaining: 3,
-          consultations_total: 3,
+          consultations_remaining: 12,
+          consultations_total: 12,
         }
       });
       return;

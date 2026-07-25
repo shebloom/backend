@@ -5,11 +5,17 @@ import { memoryCache } from '../lib/cache';
 
 export const doctorsRouter = Router();
 
+let cachedDrDeepaRecord: any = null;
+
 /**
  * Helper to ensure Dr. Deepa Madhav is the single doctor record in DB
  * and has a dedicated login credential (dr.deepa@shebloom.com / Doctor@123).
  */
 export async function getOrCreateDrDeepa() {
+  if (cachedDrDeepaRecord) {
+    return cachedDrDeepaRecord;
+  }
+
   const doctorEmail = 'dr.deepa@shebloom.com';
   const doctorName = 'Dr. Deepa Madhavan';
 
@@ -131,6 +137,7 @@ export async function getOrCreateDrDeepa() {
     });
   }
 
+  cachedDrDeepaRecord = doctorRecord;
   return doctorRecord;
 }
 

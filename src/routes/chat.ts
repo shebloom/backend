@@ -91,6 +91,43 @@ chatRouter.post('/messages', requireAuth, async (req: AuthenticatedRequest, res)
       .update({ last_message_at: new Date().toISOString() })
       .eq('id', conversation_id);
 
+    // Broadcast realtime notification to recipient (e.g. Doctor)
+    const { data: convo } = await supabaseAdmin
+      .from('chat_conversations')
+      .select('patient_id, doctor_id')
+      .eq('id', conversation_id)
+      .maybeSingle();
+
+    if (convo) {
+      const { data: senderUser } = await supabaseAdmin
+        .from('users')
+        .select('full_name, avatar_url')
+        .eq('id', req.userId)
+        .maybeSingle();
+
+      const recipientId = req.userId === convo.patient_id ? convo.doctor_id : convo.patient_id;
+
+      try {
+        const channel = supabaseAdmin.channel('shebloom-chat-notifications');
+        channel.send({
+          type: 'broadcast',
+          event: 'new_chat_message',
+          payload: {
+            conversationId: conversation_id,
+            senderId: req.userId,
+            senderName: senderUser?.full_name || 'Patient',
+            senderAvatar: senderUser?.avatar_url,
+            recipientId: recipientId,
+            recipientUserId: recipientId,
+            doctorUserId: convo.doctor_id,
+            content: content || 'Sent an attachment',
+          },
+        });
+      } catch (bcErr) {
+        console.warn('Realtime chat notification broadcast error:', bcErr);
+      }
+    }
+
     res.status(201).json({ message: data });
   } catch (err) {
     console.error('Send message error:', err);
@@ -109,6 +146,22 @@ chatRouter.post('/conversations', requireAuth, async (req: AuthenticatedRequest,
 
     if (!targetId) {
       res.status(400).json({ error: 'recipientId or doctor_id is required' });
+      return;
+    }
+
+    // Check if targetId is directly an existing conversation UUID
+    const { data: existingById } = await supabaseAdmin
+      .from('chat_conversations')
+      .select('*, doctorUser:users!chat_conversations_doctor_id_fkey(full_name, avatar_url), patients:users!chat_conversations_patient_id_fkey(full_name, avatar_url)')
+      .eq('id', targetId)
+      .maybeSingle();
+
+    if (existingById) {
+      const formattedConvo = {
+        ...existingById,
+        doctors: { users: existingById.doctorUser || { full_name: 'Dr. Deepa Madhavan', avatar_url: null } },
+      };
+      res.json({ conversation: formattedConvo, has_relationship: true });
       return;
     }
 
@@ -515,7 +568,6 @@ Guidelines:
   // 1. Try Grok (xAI API) if XAI_API_KEY / GROK_API_KEY is present
   if (xaiApiKey) {
     try {
-      console.log('🤖 Invoking xAI Grok API...');
       const grokMessages = [
         { role: 'system', content: systemPrompt },
         ...historyList.map(h => ({
@@ -542,7 +594,6 @@ Guidelines:
         const data = (await grokRes.json()) as any;
         const answer = data?.choices?.[0]?.message?.content;
         if (answer) {
-          console.log('✅ xAI Grok API response generated successfully!');
           return answer;
         }
       } else {
@@ -557,7 +608,6 @@ Guidelines:
   // 2. Try Gemini API if GEMINI_API_KEY is present
   if (geminiApiKey) {
     try {
-      console.log('🤖 Invoking Gemini API with history...');
       const contents = [...historyList, { role: 'user' as const, parts: [{ text: question }] }];
 
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey.trim()}`, {
@@ -575,7 +625,6 @@ Guidelines:
         const data = (await response.json()) as any;
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) {
-          console.log('✅ Gemini API response generated successfully!');
           return text;
         }
       } else {

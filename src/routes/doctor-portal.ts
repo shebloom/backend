@@ -4,9 +4,10 @@ import { requireAuth, requireRole, type AuthenticatedRequest } from '../middlewa
 
 export const doctorPortalRouter = Router();
 
-// All doctor portal routes require doctor role
+// Doctor portal routes require doctor OR admin role
+// Admin role is allowed so the admin panel can manage Dr. Deepa's availability/profile
 doctorPortalRouter.use(requireAuth);
-doctorPortalRouter.use(requireRole('doctor'));
+doctorPortalRouter.use(requireRole('doctor', 'admin'));
 
 /**
  * GET /api/doctor-portal/profile
@@ -142,7 +143,7 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
       const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
       const [h, min] = (a.slot_time || '').split(':').map(Number);
       const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
-      const graceEnd = new Date(scheduledDateTime.getTime() + 10 * 60 * 1000); // 10-minute grace window
+      const graceEnd = new Date(scheduledDateTime.getTime() + 30 * 60 * 1000); // Full 30-minute booking window
 
       const isTooEarly = now < scheduledDateTime;
       const isJoinableWindow = now >= scheduledDateTime && now <= graceEnd;

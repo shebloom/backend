@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../middleware/auth';
 
@@ -970,11 +972,6 @@ adminRouter.delete('/posts/:id', async (req, res) => {
 
 /**
  * GET /api/admin/wellness-sessions
-// Persistent server-side store for fallback sessions
-const LOCAL_WELLNESS_SESSIONS: any[] = [];
-
-/**
- * GET /api/admin/wellness-sessions
  * Returns all wellness sessions (Supabase DB + local fallback cache).
  */
 adminRouter.get('/wellness-sessions', async (_req, res) => {
@@ -984,6 +981,10 @@ adminRouter.get('/wellness-sessions', async (_req, res) => {
       .select('*')
       .order('created_at', { ascending: false });
 
+    if (error) {
+      console.error('[wellness-sessions] DB fetch error:', error.message);
+    }
+
     const dbSessions = data || [];
     // Combine DB sessions with local memory sessions, de-duplicating by id
     const combined = [...LOCAL_WELLNESS_SESSIONS, ...dbSessions];
@@ -991,7 +992,7 @@ adminRouter.get('/wellness-sessions', async (_req, res) => {
 
     res.json({ sessions: unique });
   } catch (err) {
-    console.error('Get wellness-sessions error:', err);
+    console.error('[wellness-sessions] GET admin — unhandled error:', err);
     res.json({ sessions: LOCAL_WELLNESS_SESSIONS });
   }
 });
@@ -1028,7 +1029,7 @@ adminRouter.post('/wellness-sessions', async (req, res) => {
       is_active: true,
     };
 
-    // 1. Try full insert into Supabase DB
+    // 1. Try full insert into Supabase DB (including video_url)
     const { data, error } = await supabaseAdmin
       .from('wellness_sessions')
       .insert(newSession)
@@ -1036,7 +1037,7 @@ adminRouter.post('/wellness-sessions', async (req, res) => {
       .single();
 
     if (error) {
-      console.warn('Supabase DB column missing, attempting insert without video_url:', error.message);
+      console.warn('[wellness-sessions] Primary DB insert failed:', error.message);
       
       // 2. If video_url column is not yet in Supabase schema cache, insert without video_url
       const dbPayload = { ...newSession };
@@ -1047,6 +1048,22 @@ adminRouter.post('/wellness-sessions', async (req, res) => {
         .insert(dbPayload)
         .select()
         .single();
+
+      if (fallbackError) {
+        console.error('[wellness-sessions] Fallback insert also failed:', fallbackError.message);
+      }
+
+      if (fallbackData) {
+        // 3. Now attempt to PATCH video_url into the newly created record
+        const { error: patchErr } = await supabaseAdmin
+          .from('wellness_sessions')
+          .update({ video_url: newSession.video_url })
+          .eq('id', fallbackData.id);
+
+        if (patchErr) {
+          console.warn(`[wellness-sessions] Could not patch video_url into DB record ${fallbackData.id}: ${patchErr.message}`);
+        }
+      }
 
       const createdSession = fallbackData
         ? { ...fallbackData, video_url: newSession.video_url }
@@ -1060,7 +1077,7 @@ adminRouter.post('/wellness-sessions', async (req, res) => {
     LOCAL_WELLNESS_SESSIONS.unshift(data);
     res.status(201).json({ session: data });
   } catch (error: any) {
-    console.error('wellness-sessions error:', error);
+    console.error('[wellness-sessions] Unhandled POST error:', error);
     const { title } = req.body || {};
     const fallbackSession = {
       id: `ws-${Date.now()}`,
@@ -1206,7 +1223,6 @@ setInterval(() => {
   for (const [id, upload] of CHUNKED_UPLOAD_STORE.entries()) {
     if (now - upload.createdAt > 30 * 60 * 1000) {
       CHUNKED_UPLOAD_STORE.delete(id);
-      console.log(`[ChunkedUpload] Cleaned up stale upload session: ${id}`);
     }
   }
 }, 10 * 60 * 1000);
@@ -1240,7 +1256,6 @@ adminRouter.post('/upload-video/chunk', async (req, res) => {
         res.status(400).json({ error: 'Upload session not found. Send chunk_index=0 first.' });
         return;
       }
-      console.log(`[ChunkedUpload] Started upload session: ${upload_id} | totalChunks=${totalChunks} | file=${file_name}`);
       CHUNKED_UPLOAD_STORE.set(upload_id, {
         chunks: new Array(totalChunks).fill(null),
         totalChunks,
@@ -1254,7 +1269,6 @@ adminRouter.post('/upload-video/chunk', async (req, res) => {
     session.chunks[chunkIdx] = chunkBuffer;
 
     const receivedCount = session.chunks.filter(Boolean).length;
-    console.log(`[ChunkedUpload] Received chunk ${chunkIdx + 1}/${totalChunks} for session ${upload_id} (${chunkBuffer.length} bytes)`);
 
     res.json({
       success: true,
@@ -1303,17 +1317,18 @@ adminRouter.post('/upload-video/finalize', async (req, res) => {
       return;
     }
 
-    console.log(`[ChunkedUpload] Finalizing upload ${upload_id} — assembling ${session.totalChunks} chunks...`);
-
     // Assemble all chunks into a single Buffer
     const fullBuffer = Buffer.concat(session.chunks);
     const sanitizeName = session.fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
     const storagePath = `videos/${Date.now()}-${sanitizeName}`;
 
-    console.log(`[ChunkedUpload] Assembled buffer: ${fullBuffer.length} bytes. Uploading to Supabase Storage...`);
-
-    // Ensure bucket exists
-    await supabaseAdmin.storage.createBucket('wellness-videos', { public: true }).catch(() => {});
+    // Ensure bucket exists and update file size limit to 1GB
+    await supabaseAdmin.storage
+      .createBucket('wellness-videos', { public: true, fileSizeLimit: 1073741824 })
+      .catch(() => {});
+    await supabaseAdmin.storage
+      .updateBucket('wellness-videos', { public: true, fileSizeLimit: 1073741824 })
+      .catch(() => {});
 
     // Upload assembled video to Supabase Storage
     const { error: uploadError } = await supabaseAdmin.storage
@@ -1324,11 +1339,34 @@ adminRouter.post('/upload-video/finalize', async (req, res) => {
       });
 
     if (uploadError) {
-      console.error('[ChunkedUpload] Storage upload failed:', uploadError.message);
-      // Clean up session on failure
-      CHUNKED_UPLOAD_STORE.delete(upload_id);
-      res.status(500).json({ error: `Storage upload failed: ${uploadError.message}` });
-      return;
+      console.warn('[ChunkedUpload] Supabase Storage upload failed or exceeded size limit:', uploadError.message);
+
+      try {
+        const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'videos');
+        if (!fs.existsSync(uploadDir)) {
+          fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        const fileBasename = `${Date.now()}-${sanitizeName}`;
+        const localFilePath = path.join(uploadDir, fileBasename);
+        fs.writeFileSync(localFilePath, fullBuffer);
+
+        const protocol = req.protocol || 'http';
+        const host = req.get('host') || 'localhost:4000';
+        const localVideoUrl = `${protocol}://${host}/api/uploads/videos/${fileBasename}`;
+
+        CHUNKED_UPLOAD_STORE.delete(upload_id);
+
+        res.json({
+          success: true,
+          video_url: localVideoUrl,
+        });
+        return;
+      } catch (diskErr: any) {
+        console.error('[ChunkedUpload] Disk fallback also failed:', diskErr);
+        CHUNKED_UPLOAD_STORE.delete(upload_id);
+        res.status(500).json({ error: `Storage upload failed: ${uploadError.message}` });
+        return;
+      }
     }
 
     const { data: publicUrlData } = supabaseAdmin.storage
@@ -1337,7 +1375,6 @@ adminRouter.post('/upload-video/finalize', async (req, res) => {
 
     // Clean up completed session
     CHUNKED_UPLOAD_STORE.delete(upload_id);
-    console.log(`[ChunkedUpload] Upload complete: ${upload_id} → ${publicUrlData.publicUrl}`);
 
     res.json({
       success: true,
@@ -1363,8 +1400,6 @@ adminRouter.post('/upload-video', async (req, res) => {
       return;
     }
 
-    console.log(`[VideoUpload] Legacy single-shot upload started: ${file_name}`);
-
     // Extract mime type & raw buffer from base64
     let mimeType = 'video/mp4';
     let base64String = file_data;
@@ -1384,26 +1419,52 @@ adminRouter.post('/upload-video', async (req, res) => {
     const sanitizeName = (file_name || `video-${Date.now()}.mp4`).replace(/[^a-zA-Z0-9._-]/g, '_');
     const storagePath = `videos/${Date.now()}-${sanitizeName}`;
 
-    await supabaseAdmin.storage.createBucket('wellness-videos', { public: true }).catch(() => {});
+    await supabaseAdmin.storage
+      .createBucket('wellness-videos', { public: true, fileSizeLimit: 1073741824 })
+      .catch(() => {});
+    await supabaseAdmin.storage
+      .updateBucket('wellness-videos', { public: true, fileSizeLimit: 1073741824 })
+      .catch(() => {});
 
     const { error: uploadError } = await supabaseAdmin.storage
       .from('wellness-videos')
       .upload(storagePath, buffer, { contentType: mimeType, upsert: true });
 
     if (uploadError) {
-      console.error('[VideoUpload] Storage upload failed:', uploadError.message);
-      res.json({
-        success: true,
-        video_url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-      });
-      return;
+      console.warn('[VideoUpload] Supabase Storage upload failed or exceeded size limit:', uploadError.message);
+      try {
+        const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'videos');
+        if (!fs.existsSync(uploadDir)) {
+          fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        const fileBasename = `${Date.now()}-${sanitizeName}`;
+        const localFilePath = path.join(uploadDir, fileBasename);
+        fs.writeFileSync(localFilePath, buffer);
+
+        const protocol = req.protocol || 'http';
+        const host = req.get('host') || 'localhost:4000';
+        const localVideoUrl = `${protocol}://${host}/api/uploads/videos/${fileBasename}`;
+
+        res.json({
+          success: true,
+          video_url: localVideoUrl,
+        });
+        return;
+      } catch (diskErr: any) {
+        console.error('[VideoUpload] Disk fallback error:', diskErr);
+        res.status(500).json({ error: `Storage upload failed: ${uploadError.message}` });
+        return;
+      }
     }
 
     const { data: publicUrlData } = supabaseAdmin.storage
       .from('wellness-videos')
       .getPublicUrl(storagePath);
 
-    console.log(`[VideoUpload] Legacy upload complete: ${publicUrlData.publicUrl}`);
+    res.json({
+      success: true,
+      video_url: publicUrlData.publicUrl,
+    });
 
     res.json({
       success: true,

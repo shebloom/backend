@@ -38,7 +38,7 @@ export async function requireAuth(
       return;
     }
 
-    // Fetch the user's role from our users table
+    // Fetch the user's role from our users table (always read fresh — never trust JWT claim)
     const { data: profile, error: profileError } = await supabaseAdmin
       .from('users')
       .select('role')
@@ -47,6 +47,7 @@ export async function requireAuth(
 
     if (profileError || !profile) {
       // User exists in auth but not in users table — create a default patient record
+      console.warn(`[auth] requireAuth: users table lookup failed for ${user.id} (${profileError?.message}). Defaulting to 'patient'.`);
       req.userId = user.id;
       req.userRole = 'patient';
       req.userEmail = user.email;
@@ -70,6 +71,11 @@ export async function requireAuth(
 export function requireRole(...roles: Array<'patient' | 'doctor' | 'admin'>) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     if (!req.userRole || !roles.includes(req.userRole)) {
+      // Log the exact role mismatch so it can be diagnosed without guessing
+      console.warn(
+        `[auth] 403 Forbidden: user=${req.userId} has role='${req.userRole}', ` +
+        `but route requires one of: [${roles.join(', ')}]`
+      );
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }

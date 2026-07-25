@@ -385,6 +385,21 @@ healthRouter.post('/prescriptions', requireAuth, requireRole('doctor'), async (r
       });
     }
 
+    // 7. Auto-update corresponding appointment status to 'completed'
+    const { data: docRecord } = await supabaseAdmin
+      .from('doctors')
+      .select('id')
+      .eq('user_id', req.userId)
+      .maybeSingle();
+
+    if (docRecord?.id) {
+      await supabaseAdmin
+        .from('appointments')
+        .update({ status: 'completed' })
+        .eq('patient_id', patient_id)
+        .eq('doctor_id', docRecord.id);
+    }
+
     res.status(201).json({ success: true, record: recordData });
   } catch (err) {
     console.error('Generate prescription error:', err);

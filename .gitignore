@@ -19,3 +19,6 @@ pnpm-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Uploaded media
+public/uploads/

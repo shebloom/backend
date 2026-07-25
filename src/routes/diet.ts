@@ -802,7 +802,6 @@ Do not output markdown code blocks, do not output any extra text. Just output cl
       const candidateModels = ['gemini-2.0-flash', 'gemini-2.5-flash-lite', 'gemini-3.6-flash'];
       for (const modelName of candidateModels) {
         try {
-          console.log(`🤖 Attempting diet generation via Gemini API (${modelName})...`);
           const response = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey.trim()}`,
             {
@@ -818,7 +817,6 @@ Do not output markdown code blocks, do not output any extra text. Just output cl
             if (text) {
               const cleaned = text.replace(/```json/i, '').replace(/```/g, '').trim();
               planData = JSON.parse(cleaned);
-              console.log(`✅ Diet plan generated successfully via Gemini (${modelName})!`);
               break;
             }
           }
@@ -830,7 +828,6 @@ Do not output markdown code blocks, do not output any extra text. Just output cl
 
     // 2. High-precision Clinical Parametric Generator Fallback if external API calls fail
     if (!planData) {
-      console.log('⚡ Generating clinical parametric diet plan...');
       planData = generateClinicalDietPlan(numericWeight, numericHeight, condition, symptoms, pref);
     }
 

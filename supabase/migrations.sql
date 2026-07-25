@@ -233,6 +233,8 @@ CREATE TABLE public.community_comments (
     post_id UUID REFERENCES public.community_posts(id) NOT NULL,
     user_id UUID REFERENCES public.users(id) NOT NULL,
     content TEXT NOT NULL,
+    parent_id UUID REFERENCES public.community_comments(id) ON DELETE CASCADE,
+    is_hidden BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -297,8 +299,58 @@ CREATE OR REPLACE FUNCTION public.increment_comments(post_id_input UUID)
 RETURNS VOID AS $$
 BEGIN
   UPDATE public.community_posts
-  SET comments = comments + 1
+  SET comments = (
+    SELECT COUNT(*) 
+    FROM public.community_comments 
+    WHERE post_id = post_id_input AND (is_hidden IS NOT TRUE)
+  )
   WHERE id = post_id_input;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to automatically recalculate post comment count on INSERT, UPDATE, or DELETE
+CREATE OR REPLACE FUNCTION public.update_post_comment_count()
+RETURNS TRIGGER AS $$
+DECLARE
+  target_post_id UUID;
+BEGIN
+  IF (TG_OP = 'DELETE') THEN
+    target_post_id := OLD.post_id;
+  ELSE
+    target_post_id := NEW.post_id;
+  END IF;
+
+  UPDATE public.community_posts
+  SET comments = (
+    SELECT COUNT(*) 
+    FROM public.community_comments 
+    WHERE post_id = target_post_id AND (is_hidden IS NOT TRUE)
+  )
+  WHERE id = target_post_id;
+
+  IF (TG_OP = 'DELETE') THEN
+    RETURN OLD;
+  ELSE
+    RETURN NEW;
+  END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trigger_update_post_comment_count ON public.community_comments;
+CREATE TRIGGER trigger_update_post_comment_count
+AFTER INSERT OR UPDATE OR DELETE ON public.community_comments
+FOR EACH ROW EXECUTE FUNCTION public.update_post_comment_count();
+
+-- Function to recalculate all post comment counts across the database
+CREATE OR REPLACE FUNCTION public.recalculate_all_comment_counts()
+RETURNS VOID AS $$
+BEGIN
+  UPDATE public.community_posts p
+  SET comments = (
+    SELECT COUNT(*) 
+    FROM public.community_comments c 
+    WHERE c.post_id = p.id AND (c.is_hidden IS NOT TRUE)
+  );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 

@@ -200,11 +200,15 @@ wellnessRouter.delete('/admin/videos/:id', requireAuth, requireRole('admin'), as
  */
 wellnessRouter.get('/sessions', async (_req, res) => {
   try {
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('wellness_sessions')
       .select('*')
       .eq('is_active', true)
       .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('[wellness-sessions] Patient GET /sessions \u2014 DB fetch error:', error.message);
+    }
 
     const dbSessions = data || [];
     const combined = [...LOCAL_WELLNESS_SESSIONS, ...dbSessions];
@@ -212,7 +216,7 @@ wellnessRouter.get('/sessions', async (_req, res) => {
 
     res.json({ sessions: unique });
   } catch (err) {
-    console.error('Get user wellness sessions error:', err);
+    console.error('[wellness-sessions] Patient GET /sessions \u2014 unhandled error:', err);
     res.json({ sessions: LOCAL_WELLNESS_SESSIONS });
   }
 });
