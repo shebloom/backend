@@ -268,10 +268,10 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
     }
 
     const now = new Date();
+    const missedIds: string[] = [];
 
     // Process appointments with 10-minute grace period enforcement
     let formatted = (data || []).map((a: any) => {
-      // ── TIMEZONE-SAFE: slot_time is stored in IST; convert to UTC for server-side comparison ──
       const scheduledDateTime = parseAppointmentTimeAsIST(a.appointment_date, a.slot_time);
       const graceEnd = new Date(scheduledDateTime.getTime() + CONSULTATION_JOIN_WINDOW_MS);
 
@@ -282,7 +282,7 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
       let displayStatus = a.status;
       if (isPastGrace && ['confirmed', 'pending', 'rescheduled'].includes(a.status)) {
         displayStatus = 'missed';
-        supabaseAdmin.from('appointments').update({ status: 'missed' }).eq('id', a.id).then();
+        missedIds.push(a.id);
       }
 
       return {
@@ -298,6 +298,15 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
         can_reschedule: isPastGrace || ['missed', 'canceled'].includes(displayStatus),
       };
     });
+
+    if (missedIds.length > 0) {
+      Promise.resolve(
+        supabaseAdmin
+          .from('appointments')
+          .update({ status: 'missed' })
+          .in('id', missedIds)
+      ).catch((err: any) => console.error('Batch missed status update error:', err));
+    }
 
     if (upcoming === 'true') {
       formatted = formatted.filter((a: any) => {

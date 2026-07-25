@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
-import { LOCAL_DIET_PLANS } from '../lib/memoryStore';
 import { randomUUID } from 'crypto';
 
 export const dietRouter = Router();
@@ -109,36 +108,21 @@ dietRouter.get('/patient', requireAuth, async (req: AuthenticatedRequest, res) =
       .order('updated_at', { ascending: false });
 
     const dbPlans = (data || []).map(normalizeDietPlan);
-    const memPlans = LOCAL_DIET_PLANS.filter(p => p.patient_id === req.userId).map(normalizeDietPlan);
-    const combined = [...dbPlans, ...memPlans];
-    const unique = Array.from(new Map(combined.map(p => [p.id, p])).values());
-
-    unique.sort((a, b) => {
-      const timeA = new Date(a.updated_at || a.created_at).getTime();
-      const timeB = new Date(b.updated_at || b.created_at).getTime();
-      return timeB - timeA;
-    });
 
     // Rule 1: Priority for doctor-assigned plan
-    const doctorPlan = unique.find(p => p.source === 'doctor');
+    const doctorPlan = dbPlans.find(p => p.source === 'doctor');
     // Rule 2: Fallback to AI-generated plan
-    const aiPlan = unique.find(p => p.source === 'ai_generated');
+    const aiPlan = dbPlans.find(p => p.source === 'ai_generated');
 
     const activePlan = doctorPlan || aiPlan || null;
 
     res.json({
       active_plan: activePlan,
-      diet_plans: unique,
+      diet_plans: dbPlans,
     });
   } catch (err) {
     console.error('Get patient diet plans error:', err);
-    const memPlans = LOCAL_DIET_PLANS.filter(p => p.patient_id === req.userId).map(normalizeDietPlan);
-    const doctorPlan = memPlans.find(p => p.source === 'doctor');
-    const aiPlan = memPlans.find(p => p.source === 'ai_generated');
-    res.json({
-      active_plan: doctorPlan || aiPlan || null,
-      diet_plans: memPlans,
-    });
+    res.status(500).json({ error: 'Failed to fetch diet plans' });
   }
 });
 
@@ -157,24 +141,17 @@ dietRouter.get('/patient/:patientId', requireAuth, async (req: AuthenticatedRequ
       .order('updated_at', { ascending: false });
 
     const dbPlans = (data || []).map(normalizeDietPlan);
-    const memPlans = LOCAL_DIET_PLANS.filter(p => p.patient_id === patientId).map(normalizeDietPlan);
-    const combined = [...dbPlans, ...memPlans];
-    const unique = Array.from(new Map(combined.map(p => [p.id, p])).values());
 
-    unique.sort((a, b) => {
-      const timeA = new Date(a.updated_at || a.created_at).getTime();
-      const timeB = new Date(b.updated_at || b.created_at).getTime();
-      return timeB - timeA;
+    const doctorPlan = dbPlans.find(p => p.source === 'doctor');
+    const aiPlan = dbPlans.find(p => p.source === 'ai_generated');
+
+    res.json({
+      diet_plan: doctorPlan || aiPlan || dbPlans[0] || null,
+      diet_plans: dbPlans,
     });
-
-    const doctorPlan = unique.find(p => p.source === 'doctor');
-    const aiPlan = unique.find(p => p.source === 'ai_generated');
-    const activePlan = doctorPlan || aiPlan || unique[0] || null;
-
-    res.json({ diet_plan: activePlan });
   } catch (err) {
-    console.error('Get patient diet plan by doctor error:', err);
-    res.status(500).json({ error: 'Failed to fetch patient diet plan' });
+    console.error('Get patient diet plan by ID error:', err);
+    res.status(500).json({ error: 'Failed to fetch diet plan' });
   }
 });
 
@@ -326,14 +303,11 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
 
     if (error) {
       console.error('Insert/Update diet plan error:', error);
-      const fallback = normalizeDietPlan({ id: `diet-${Date.now()}`, ...newDietPlan });
-      LOCAL_DIET_PLANS.unshift(fallback);
-      res.status(201).json({ diet_plan: fallback });
+      res.status(500).json({ error: 'Failed to save diet plan to database' });
       return;
     }
 
     const normalizedData = normalizeDietPlan(data);
-    LOCAL_DIET_PLANS.unshift(normalizedData);
 
     // Auto-send chat message notification to patient from Dr. Deepa
     try {
@@ -852,12 +826,15 @@ Do not output markdown code blocks, do not output any extra text. Just output cl
     };
 
     const normalizedPlan = normalizeDietPlan(newPlan);
-    LOCAL_DIET_PLANS.unshift(normalizedPlan);
 
     // Save to database
-    await supabaseAdmin
+    const { error: insertErr } = await supabaseAdmin
       .from('diet_plans')
       .insert(newPlan);
+
+    if (insertErr) {
+      console.error('Diet generator DB insert error:', insertErr);
+    }
 
     res.status(201).json({ diet_plan: normalizedPlan });
   } catch (err: any) {

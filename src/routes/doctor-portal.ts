@@ -101,9 +101,13 @@ doctorPortalRouter.patch('/profile', async (req: AuthenticatedRequest, res) => {
  */
 doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) => {
   try {
-    const { status, upcoming } = req.query;
+    const { status, upcoming, limit: limitQuery, page: pageQuery } = req.query;
 
-    // First get the doctor record
+    const limit = Math.min(Number(limitQuery) || 50, 100);
+    const page = Math.max(Number(pageQuery) || 1, 1);
+    const offset = (page - 1) * limit;
+
+    // 1. Get the doctor record
     const { data: doctor } = await supabaseAdmin
       .from('doctors')
       .select('id')
@@ -117,21 +121,26 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
 
     let query = supabaseAdmin
       .from('appointments')
-      .select('*, users!appointments_patient_id_fkey(full_name, avatar_url)')
+      .select('*, users!appointments_patient_id_fkey(full_name, avatar_url)', { count: 'exact' })
       .eq('doctor_id', doctor.id);
 
     if (status) query = query.eq('status', status);
 
+    const todayStr = new Date().toISOString().split('T')[0];
+
     if (upcoming === 'true') {
       query = query
-        .gte('appointment_date', new Date().toISOString().split('T')[0])
+        .gte('appointment_date', todayStr)
         .in('status', ['confirmed', 'pending', 'rescheduled', 'completed'])
-        .order('appointment_date', { ascending: true });
+        .order('appointment_date', { ascending: true })
+        .order('slot_time', { ascending: true });
     } else {
-      query = query.order('appointment_date', { ascending: false });
+      query = query.order('appointment_date', { ascending: false }).order('slot_time', { ascending: false });
     }
 
-    const { data, error } = await query;
+    query = query.range(offset, offset + limit - 1);
+
+    const { data, count, error } = await query;
 
     if (error) {
       res.status(500).json({ error: 'Failed to fetch appointments' });
@@ -139,9 +148,9 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
     }
 
     const now = new Date();
+    const missedIds: string[] = [];
 
     let appointments = (data || []).map((a: any) => {
-      // ── TIMEZONE-SAFE: slot_time is stored in IST; convert to UTC for server-side comparison ──
       const scheduledDateTime = parseAppointmentTimeAsIST(a.appointment_date, a.slot_time);
       const graceEnd = new Date(scheduledDateTime.getTime() + CONSULTATION_JOIN_WINDOW_MS);
 
@@ -152,8 +161,7 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
       let displayStatus = a.status;
       if (isPastGrace && ['confirmed', 'pending', 'rescheduled'].includes(a.status)) {
         displayStatus = 'missed';
-        // Auto-update DB status to missed
-        supabaseAdmin.from('appointments').update({ status: 'missed' }).eq('id', a.id).then();
+        missedIds.push(a.id);
       }
 
       return {
@@ -168,15 +176,31 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
       };
     });
 
+    // Batch database update for missed appointments (1 single query instead of N N+1 queries)
+    if (missedIds.length > 0) {
+      Promise.resolve(
+        supabaseAdmin
+          .from('appointments')
+          .update({ status: 'missed' })
+          .in('id', missedIds)
+      ).catch((err: any) => console.error('Batch missed status update error:', err));
+    }
+
     if (upcoming === 'true') {
       appointments = appointments.filter((a: any) => {
-        // Include 'completed' so already-joined appointments remain visible for re-join during the window.
-        // Must match the same statuses as appointments.ts and the frontend getCallWindowState check.
         return (a.is_joinable || a.is_too_early) && ['confirmed', 'pending', 'rescheduled', 'completed'].includes(a.display_status);
       });
     }
 
-    res.json({ appointments });
+    res.json({
+      appointments,
+      pagination: {
+        page,
+        limit,
+        total: count || appointments.length,
+        has_more: offset + appointments.length < (count || 0),
+      },
+    });
   } catch (err) {
     console.error('Get doctor appointments error:', err);
     res.status(500).json({ error: 'Failed to fetch appointments' });

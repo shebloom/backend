@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../middleware/auth';
-import { LOCAL_WELLNESS_SESSIONS } from '../lib/memoryStore';
 
 export const wellnessRouter = Router();
 
@@ -207,16 +206,14 @@ wellnessRouter.get('/sessions', async (_req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('[wellness-sessions] Patient GET /sessions \u2014 DB fetch error:', error.message);
+      console.error('[wellness-sessions] Patient GET /sessions — DB fetch error:', error.message);
+      res.status(500).json({ error: 'Failed to fetch wellness sessions' });
+      return;
     }
 
-    const dbSessions = data || [];
-    const combined = [...LOCAL_WELLNESS_SESSIONS, ...dbSessions];
-    const unique = Array.from(new Map(combined.map(s => [s.id, s])).values());
-
-    res.json({ sessions: unique });
+    res.json({ sessions: data || [] });
   } catch (err) {
-    console.error('[wellness-sessions] Patient GET /sessions \u2014 unhandled error:', err);
-    res.json({ sessions: LOCAL_WELLNESS_SESSIONS });
+    console.error('[wellness-sessions] Patient GET /sessions — unhandled error:', err);
+    res.status(500).json({ error: 'Failed to fetch wellness sessions' });
   }
 });

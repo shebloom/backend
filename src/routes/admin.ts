@@ -3,10 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../middleware/auth';
+import { randomUUID } from 'crypto';
 
 export const adminRouter = Router();
-
-import { LOCAL_WELLNESS_PROGRAMS, LOCAL_WELLNESS_SESSIONS, LOCAL_DIET_PLANS } from '../lib/memoryStore';
 
 // All admin routes require admin role
 adminRouter.use(requireAuth);
@@ -828,19 +827,21 @@ adminRouter.get('/consultations', async (_req, res) => {
  */
 adminRouter.get('/programs', async (_req, res) => {
   try {
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('wellness_programs')
       .select('*')
       .order('created_at', { ascending: false });
 
-    const dbProgs = data || [];
-    const combined = [...LOCAL_WELLNESS_PROGRAMS, ...dbProgs];
-    const unique = Array.from(new Map(combined.map(p => [p.id, p])).values());
+    if (error) {
+      console.error('Get programs error:', error);
+      res.status(500).json({ error: 'Failed to fetch programs' });
+      return;
+    }
 
-    res.json({ programs: unique });
+    res.json({ programs: data || [] });
   } catch (err) {
     console.error('Get programs error:', err);
-    res.json({ programs: LOCAL_WELLNESS_PROGRAMS });
+    res.status(500).json({ error: 'Failed to fetch programs' });
   }
 });
 
@@ -856,30 +857,33 @@ adminRouter.post('/programs', async (req, res) => {
     const defaultImage = 'https://images.pexels.com/photos/3822621/pexels-photo-3822621.jpeg?auto=compress&cs=tinysrgb&w=400';
 
     const newProg = {
-      id: `prog-${Date.now()}`,
+      id: randomUUID(),
       title,
-      description,
+      description: description || title,
       duration: durationText,
       category: category || 'Yoga',
-      content: content || null,
-      benefits: benefits || null,
       image_url: defaultImage,
       is_active: is_active !== false,
       created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
 
-    LOCAL_WELLNESS_PROGRAMS.unshift(newProg);
-
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('wellness_programs')
       .insert(newProg)
       .select()
       .single();
 
-    res.status(201).json({ program: data || newProg });
+    if (error) {
+      console.error('Create program DB error:', error);
+      res.status(500).json({ error: 'Failed to create program' });
+      return;
+    }
+
+    res.status(201).json({ program: data });
   } catch (err) {
     console.error('Create program error:', err);
-    res.status(201).json({ program: { id: `prog-${Date.now()}`, title: req.body.title } });
+    res.status(500).json({ error: 'Failed to create program' });
   }
 });
 
@@ -889,16 +893,15 @@ adminRouter.post('/programs', async (req, res) => {
  */
 adminRouter.delete('/programs/:id', async (req, res) => {
   try {
-    // Remove from local memory
-    const idx = LOCAL_WELLNESS_PROGRAMS.findIndex(p => p.id === req.params.id);
-    if (idx !== -1) {
-      LOCAL_WELLNESS_PROGRAMS.splice(idx, 1);
-    }
-
-    await supabaseAdmin
+    const { error } = await supabaseAdmin
       .from('wellness_programs')
       .delete()
       .eq('id', req.params.id);
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to delete program' });
+      return;
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -913,31 +916,28 @@ adminRouter.delete('/programs/:id', async (req, res) => {
  */
 adminRouter.patch('/programs/:id', async (req, res) => {
   try {
-    const { title, description, duration, category, content, benefits, image_url, is_active } = req.body;
+    const { title, description, duration, category, image_url, is_active } = req.body;
     const updates: any = { updated_at: new Date().toISOString() };
     if (title !== undefined) updates.title = title;
     if (description !== undefined) updates.description = description;
     if (duration !== undefined) updates.duration = duration;
     if (category !== undefined) updates.category = category;
-    if (content !== undefined) updates.content = content;
-    if (benefits !== undefined) updates.benefits = benefits;
     if (image_url !== undefined) updates.image_url = image_url;
     if (is_active !== undefined) updates.is_active = is_active;
 
-    // Update local memory cache
-    const idx = LOCAL_WELLNESS_PROGRAMS.findIndex(p => p.id === req.params.id);
-    if (idx !== -1) {
-      LOCAL_WELLNESS_PROGRAMS[idx] = { ...LOCAL_WELLNESS_PROGRAMS[idx], ...updates };
-    }
-
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('wellness_programs')
       .update(updates)
       .eq('id', req.params.id)
       .select()
       .single();
 
-    res.json({ program: data || { id: req.params.id, ...updates } });
+    if (error) {
+      res.status(500).json({ error: 'Failed to update program' });
+      return;
+    }
+
+    res.json({ program: data });
   } catch (err) {
     console.error('Update program error:', err);
     res.status(500).json({ error: 'Failed to update program' });
@@ -972,7 +972,7 @@ adminRouter.delete('/posts/:id', async (req, res) => {
 
 /**
  * GET /api/admin/wellness-sessions
- * Returns all wellness sessions (Supabase DB + local fallback cache).
+ * Returns all wellness sessions.
  */
 adminRouter.get('/wellness-sessions', async (_req, res) => {
   try {
@@ -983,23 +983,20 @@ adminRouter.get('/wellness-sessions', async (_req, res) => {
 
     if (error) {
       console.error('[wellness-sessions] DB fetch error:', error.message);
+      res.status(500).json({ error: 'Failed to fetch wellness sessions' });
+      return;
     }
 
-    const dbSessions = data || [];
-    // Combine DB sessions with local memory sessions, de-duplicating by id
-    const combined = [...LOCAL_WELLNESS_SESSIONS, ...dbSessions];
-    const unique = Array.from(new Map(combined.map(s => [s.id, s])).values());
-
-    res.json({ sessions: unique });
+    res.json({ sessions: data || [] });
   } catch (err) {
     console.error('[wellness-sessions] GET admin — unhandled error:', err);
-    res.json({ sessions: LOCAL_WELLNESS_SESSIONS });
+    res.status(500).json({ error: 'Failed to fetch wellness sessions' });
   }
 });
 
 /**
  * POST /api/admin/wellness-sessions
- * Create a new wellness session with schema fallback & persistence.
+ * Create a new wellness session.
  */
 adminRouter.post('/wellness-sessions', async (req, res) => {
   try {
@@ -1018,6 +1015,7 @@ adminRouter.post('/wellness-sessions', async (req, res) => {
       : 'https://images.pexels.com/photos/3759657/pexels-photo-3759657.jpeg?auto=compress&cs=tinysrgb&w=400';
 
     const newSession = {
+      id: randomUUID(),
       title,
       subtitle: subtitle || 'Women’s Wellness Session',
       duration: duration || '20 min',
@@ -1027,9 +1025,10 @@ adminRouter.post('/wellness-sessions', async (req, res) => {
       thumbnail_url: thumbnail_url || defaultImage,
       video_url: video_url || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
       is_active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
 
-    // 1. Try full insert into Supabase DB (including video_url)
     const { data, error } = await supabaseAdmin
       .from('wellness_sessions')
       .insert(newSession)
@@ -1037,61 +1036,15 @@ adminRouter.post('/wellness-sessions', async (req, res) => {
       .single();
 
     if (error) {
-      console.warn('[wellness-sessions] Primary DB insert failed:', error.message);
-      
-      // 2. If video_url column is not yet in Supabase schema cache, insert without video_url
-      const dbPayload = { ...newSession };
-      delete (dbPayload as any).video_url;
-
-      const { data: fallbackData, error: fallbackError } = await supabaseAdmin
-        .from('wellness_sessions')
-        .insert(dbPayload)
-        .select()
-        .single();
-
-      if (fallbackError) {
-        console.error('[wellness-sessions] Fallback insert also failed:', fallbackError.message);
-      }
-
-      if (fallbackData) {
-        // 3. Now attempt to PATCH video_url into the newly created record
-        const { error: patchErr } = await supabaseAdmin
-          .from('wellness_sessions')
-          .update({ video_url: newSession.video_url })
-          .eq('id', fallbackData.id);
-
-        if (patchErr) {
-          console.warn(`[wellness-sessions] Could not patch video_url into DB record ${fallbackData.id}: ${patchErr.message}`);
-        }
-      }
-
-      const createdSession = fallbackData
-        ? { ...fallbackData, video_url: newSession.video_url }
-        : { id: `ws-${Date.now()}`, ...newSession, created_at: new Date().toISOString() };
-
-      LOCAL_WELLNESS_SESSIONS.unshift(createdSession);
-      res.status(201).json({ session: createdSession });
+      console.error('[wellness-sessions] DB insert error:', error.message);
+      res.status(500).json({ error: 'Failed to create wellness session' });
       return;
     }
 
-    LOCAL_WELLNESS_SESSIONS.unshift(data);
     res.status(201).json({ session: data });
   } catch (error: any) {
     console.error('[wellness-sessions] Unhandled POST error:', error);
-    const { title } = req.body || {};
-    const fallbackSession = {
-      id: `ws-${Date.now()}`,
-      title: title || 'New Wellness Session',
-      subtitle: 'Women’s Wellness Session',
-      duration: '20 min',
-      type: 'self-paced',
-      category: 'General Wellness',
-      video_url: req.body?.video_url || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-      is_active: true,
-      created_at: new Date().toISOString(),
-    };
-    LOCAL_WELLNESS_SESSIONS.unshift(fallbackSession);
-    res.status(201).json({ session: fallbackSession });
+    res.status(500).json({ error: 'Failed to create wellness session' });
   }
 });
 
@@ -1113,20 +1066,19 @@ adminRouter.patch('/wellness-sessions/:id', async (req, res) => {
     if (video_url !== undefined) updates.video_url = video_url;
     if (is_active !== undefined) updates.is_active = is_active;
 
-    // Update in local memory cache
-    const idx = LOCAL_WELLNESS_SESSIONS.findIndex(s => s.id === req.params.id);
-    if (idx !== -1) {
-      LOCAL_WELLNESS_SESSIONS[idx] = { ...LOCAL_WELLNESS_SESSIONS[idx], ...updates };
-    }
-
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('wellness_sessions')
       .update(updates)
       .eq('id', req.params.id)
       .select()
       .single();
 
-    res.json({ session: data || { id: req.params.id, ...updates } });
+    if (error) {
+      res.status(500).json({ error: 'Failed to update wellness session' });
+      return;
+    }
+
+    res.json({ session: data });
   } catch (err) {
     console.error('Update wellness session error:', err);
     res.status(500).json({ error: 'Failed to update wellness session' });
@@ -1162,19 +1114,21 @@ adminRouter.delete('/wellness-sessions/:id', async (req, res) => {
  */
 adminRouter.get('/diet-plans', async (_req, res) => {
   try {
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('diet_plans')
       .select('*, users!diet_plans_patient_id_fkey(full_name, email)')
       .order('created_at', { ascending: false });
 
-    const dbPlans = data || [];
-    const combined = [...LOCAL_DIET_PLANS, ...dbPlans];
-    const unique = Array.from(new Map(combined.map(p => [p.id, p])).values());
+    if (error) {
+      console.error('Admin get diet plans error:', error);
+      res.status(500).json({ error: 'Failed to fetch diet plans' });
+      return;
+    }
 
-    res.json({ diet_plans: unique });
+    res.json({ diet_plans: data || [] });
   } catch (err) {
     console.error('Admin get diet plans error:', err);
-    res.json({ diet_plans: LOCAL_DIET_PLANS });
+    res.status(500).json({ error: 'Failed to fetch diet plans' });
   }
 });
 
@@ -1191,23 +1145,82 @@ adminRouter.patch('/diet-plans/:id', async (req, res) => {
     if (plan_details !== undefined) updates.plan_details = plan_details;
     if (notes !== undefined) updates.notes = notes;
 
-    // Update in local memory cache
-    const idx = LOCAL_DIET_PLANS.findIndex(p => p.id === req.params.id);
-    if (idx !== -1) {
-      LOCAL_DIET_PLANS[idx] = { ...LOCAL_DIET_PLANS[idx], ...updates };
-    }
-
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('diet_plans')
       .update(updates)
       .eq('id', req.params.id)
       .select()
       .single();
 
-    res.json({ diet_plan: data || { id: req.params.id, ...updates } });
+    if (error) {
+      res.status(500).json({ error: 'Failed to update diet plan' });
+      return;
+    }
+
+    res.json({ diet_plan: data });
   } catch (err) {
     console.error('Admin update diet plan error:', err);
     res.status(500).json({ error: 'Failed to update diet plan' });
+  }
+});
+
+/**
+ * GET /api/admin/appointments/corrupted-completed
+ * Identifies appointments that were wrongly marked as 'completed'
+ * even though their appointment_date is in the future.
+ */
+adminRouter.get('/appointments/corrupted-completed', async (_req, res) => {
+  try {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const { data: corrupted, error } = await supabaseAdmin
+      .from('appointments')
+      .select('*, users!appointments_patient_id_fkey(full_name, email), doctors(*, users!inner(full_name))')
+      .eq('status', 'completed')
+      .gt('appointment_date', todayStr)
+      .order('appointment_date', { ascending: true });
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to inspect appointments' });
+      return;
+    }
+
+    res.json({
+      count: corrupted?.length || 0,
+      corrupted_appointments: corrupted || [],
+    });
+  } catch (err) {
+    console.error('Audit corrupted appointments error:', err);
+    res.status(500).json({ error: 'Failed to inspect appointments' });
+  }
+});
+
+/**
+ * POST /api/admin/appointments/restore-corrupted
+ * Restores specified appointment IDs back to 'confirmed' status.
+ */
+adminRouter.post('/appointments/restore-corrupted', async (req, res) => {
+  try {
+    const { appointment_ids } = req.body;
+    if (!Array.isArray(appointment_ids) || appointment_ids.length === 0) {
+      res.status(400).json({ error: 'appointment_ids array is required' });
+      return;
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('appointments')
+      .update({ status: 'confirmed' })
+      .in('id', appointment_ids)
+      .select('id, appointment_date, slot_time, status');
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to restore appointments' });
+      return;
+    }
+
+    res.json({ restored_count: data?.length || 0, restored: data || [] });
+  } catch (err) {
+    console.error('Restore appointments error:', err);
+    res.status(500).json({ error: 'Failed to restore appointments' });
   }
 });
 
