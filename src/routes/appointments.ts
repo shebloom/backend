@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { memoryCache } from '../lib/cache';
-import { CONSULTATION_JOIN_WINDOW_MS, CONSULTATION_JOIN_WINDOW_MINUTES } from '../lib/constants';
+import { CONSULTATION_JOIN_WINDOW_MS, CONSULTATION_JOIN_WINDOW_MINUTES, parseAppointmentTimeAsIST } from '../lib/constants';
 
 export const appointmentsRouter = Router();
 
@@ -271,9 +271,8 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
 
     // Process appointments with 10-minute grace period enforcement
     let formatted = (data || []).map((a: any) => {
-      const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
-      const [h, min] = (a.slot_time || '').split(':').map(Number);
-      const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
+      // ── TIMEZONE-SAFE: slot_time is stored in IST; convert to UTC for server-side comparison ──
+      const scheduledDateTime = parseAppointmentTimeAsIST(a.appointment_date, a.slot_time);
       const graceEnd = new Date(scheduledDateTime.getTime() + CONSULTATION_JOIN_WINDOW_MS);
 
       const isTooEarly = now < scheduledDateTime;
@@ -370,13 +369,20 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       return;
     }
 
-    const apptDateStr = appointment.appointment_date;
+    // ── TIMEZONE-SAFE: slot_time is stored in IST; convert to UTC for server-side comparison ──
     const now = new Date();
-    const [y, m, d] = (apptDateStr || '').split('-').map(Number);
-    const [sh, sm] = (appointment.slot_time || '').split(':').map(Number);
-    const scheduledStart = new Date(y, (m || 1) - 1, d || 1, sh || 0, sm || 0, 0, 0);
+    const scheduledStart = parseAppointmentTimeAsIST(appointment.appointment_date, appointment.slot_time);
     const graceEnd = new Date(scheduledStart.getTime() + CONSULTATION_JOIN_WINDOW_MS);
     const secondsRemainingInGraceWindow = Math.max(0, Math.floor((graceEnd.getTime() - now.getTime()) / 1000));
+
+    // ── DEBUG LOGGING ──────────────────────────────────────────────────────────────────────────
+    console.log(`[JOIN] appointmentId=${appointmentId}`);
+    console.log(`[JOIN] appointment_date=${appointment.appointment_date} slot_time=${appointment.slot_time}`);
+    console.log(`[JOIN] scheduledStart (UTC): ${scheduledStart.toISOString()}`);
+    console.log(`[JOIN] now          (UTC): ${now.toISOString()}`);
+    console.log(`[JOIN] graceEnd     (UTC): ${graceEnd.toISOString()}`);
+    console.log(`[JOIN] isTooEarly=${now < scheduledStart} | isJoinable=${now >= scheduledStart && now <= graceEnd} | isPastGrace=${now > graceEnd}`);
+    // ──────────────────────────────────────────────────────────────────────────────────────────
 
     // Condition C: Within active window — Mark as completed since call is attended
     await supabaseAdmin

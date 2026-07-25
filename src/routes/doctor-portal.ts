@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../middleware/auth';
-import { CONSULTATION_JOIN_WINDOW_MS } from '../lib/constants';
+import { CONSULTATION_JOIN_WINDOW_MS, parseAppointmentTimeAsIST } from '../lib/constants';
 
 export const doctorPortalRouter = Router();
 
@@ -141,9 +141,8 @@ doctorPortalRouter.get('/appointments', async (req: AuthenticatedRequest, res) =
     const now = new Date();
 
     let appointments = (data || []).map((a: any) => {
-      const [y, m, d] = (a.appointment_date || '').split('-').map(Number);
-      const [h, min] = (a.slot_time || '').split(':').map(Number);
-      const scheduledDateTime = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, 0, 0);
+      // ── TIMEZONE-SAFE: slot_time is stored in IST; convert to UTC for server-side comparison ──
+      const scheduledDateTime = parseAppointmentTimeAsIST(a.appointment_date, a.slot_time);
       const graceEnd = new Date(scheduledDateTime.getTime() + CONSULTATION_JOIN_WINDOW_MS);
 
       const isTooEarly = now < scheduledDateTime;
