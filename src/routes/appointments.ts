@@ -166,6 +166,41 @@ appointmentsRouter.post('/', requireAuth, async (req: AuthenticatedRequest, res)
         consultations_remaining: Math.max(0, 12 - (apptCount + 1)),
       }, { onConflict: 'user_id' });
 
+    // Broadcast realtime notification to Doctor
+    try {
+      const { data: docRecord } = await supabaseAdmin
+        .from('doctors')
+        .select('user_id')
+        .eq('id', doctor_id)
+        .maybeSingle();
+
+      const { data: patientUser } = await supabaseAdmin
+        .from('users')
+        .select('full_name, avatar_url')
+        .eq('id', req.userId)
+        .maybeSingle();
+
+      if (docRecord?.user_id) {
+        const notifChannel = supabaseAdmin.channel('shebloom-notifications');
+        notifChannel.send({
+          type: 'broadcast',
+          event: 'new_appointment_booked',
+          payload: {
+            appointmentId: data?.id || tempId,
+            doctorId: docRecord.user_id,
+            recipientId: docRecord.user_id,
+            patientId: req.userId,
+            patientName: patientUser?.full_name || 'Patient',
+            patientAvatar: patientUser?.avatar_url,
+            date: appointment_date,
+            slot: slot_time,
+          },
+        });
+      }
+    } catch (bcErr) {
+      console.warn('New appointment broadcast error:', bcErr);
+    }
+
     res.status(201).json({
       appointment: {
         ...data,
@@ -183,6 +218,7 @@ appointmentsRouter.post('/', requireAuth, async (req: AuthenticatedRequest, res)
 /**
  * GET /api/appointments
  * Returns the current user's appointments with video room links.
+ * Automatically queries by doctor_id if the caller is a Doctor account.
  */
 appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
@@ -190,8 +226,23 @@ appointmentsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res) 
 
     let query = supabaseAdmin
       .from('appointments')
-      .select('*, doctors(*, users!inner(full_name, avatar_url))')
-      .eq('patient_id', req.userId);
+      .select('*, doctors(*, users!inner(full_name, avatar_url))');
+
+    if (req.userRole === 'doctor') {
+      const { data: docRecord } = await supabaseAdmin
+        .from('doctors')
+        .select('id')
+        .eq('user_id', req.userId)
+        .maybeSingle();
+
+      if (docRecord?.id) {
+        query = query.eq('doctor_id', docRecord.id);
+      } else {
+        query = query.eq('patient_id', req.userId);
+      }
+    } else {
+      query = query.eq('patient_id', req.userId);
+    }
 
     if (status) {
       query = query.eq('status', status);
@@ -519,6 +570,36 @@ appointmentsRouter.post('/:id/reschedule-request', requireAuth, async (req: Auth
         .eq('id', convo.id);
     }
 
+    // Broadcast realtime reschedule notification
+    try {
+      const { data: senderUser } = await supabaseAdmin
+        .from('users')
+        .select('full_name')
+        .eq('id', req.userId)
+        .maybeSingle();
+
+      const recipientUserId = req.userId === patientUserId ? doctorUserId : patientUserId;
+      if (recipientUserId) {
+        const notifChannel = supabaseAdmin.channel('shebloom-notifications');
+        notifChannel.send({
+          type: 'broadcast',
+          event: 'appointment_rescheduled',
+          payload: {
+            appointmentId: req.params.id,
+            rescheduledBy: req.userId,
+            rescheduledByName: senderUser?.full_name || (req.userRole === 'doctor' ? 'Dr. Deepa Madhavan' : 'Patient'),
+            recipientId: recipientUserId,
+            doctorId: doctorUserId,
+            patientId: patientUserId,
+            newDate: new_date,
+            newSlot: new_slot_time,
+          },
+        });
+      }
+    } catch (bcErr) {
+      console.warn('Reschedule broadcast error:', bcErr);
+    }
+
     res.json({ success: true, message: 'Reschedule request sent to chat.' });
   } catch (err) {
     console.error('Reschedule request error:', err);
@@ -594,6 +675,36 @@ appointmentsRouter.post('/:id/reschedule-accept', requireAuth, async (req: Authe
         .from('chat_conversations')
         .update({ last_message_at: new Date().toISOString() })
         .eq('id', convo.id);
+    }
+
+    // Broadcast confirmation notification
+    try {
+      const { data: senderUser } = await supabaseAdmin
+        .from('users')
+        .select('full_name')
+        .eq('id', req.userId)
+        .maybeSingle();
+
+      const recipientUserId = req.userId === patientUserId ? doctorUserId : patientUserId;
+      if (recipientUserId) {
+        const notifChannel = supabaseAdmin.channel('shebloom-notifications');
+        notifChannel.send({
+          type: 'broadcast',
+          event: 'appointment_rescheduled',
+          payload: {
+            appointmentId: req.params.id,
+            rescheduledBy: req.userId,
+            rescheduledByName: senderUser?.full_name || (req.userRole === 'doctor' ? 'Dr. Deepa Madhavan' : 'Patient'),
+            recipientId: recipientUserId,
+            doctorId: doctorUserId,
+            patientId: patientUserId,
+            newDate: new_date,
+            newSlot: new_slot_time,
+          },
+        });
+      }
+    } catch (bcErr) {
+      console.warn('Reschedule accept broadcast error:', bcErr);
     }
 
     res.json({ success: true, appointment: updatedAppt });
