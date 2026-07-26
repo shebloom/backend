@@ -93,6 +93,7 @@ async function run() {
         appointment_id UUID UNIQUE REFERENCES public.appointments(id) ON DELETE CASCADE,
         patient_id UUID REFERENCES public.users(id) NOT NULL,
         doctor_id UUID REFERENCES public.users(id) NOT NULL,
+        source TEXT DEFAULT 'doctor',
         title TEXT NOT NULL,
         plan_details JSONB NOT NULL DEFAULT '{}'::jsonb,
         document_url TEXT,
@@ -100,6 +101,8 @@ async function run() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      ALTER TABLE public.diet_plans ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'doctor';
 
       CREATE INDEX IF NOT EXISTS idx_diet_plans_patient ON public.diet_plans (patient_id, created_at DESC);
 
