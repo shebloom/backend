@@ -892,20 +892,36 @@ adminRouter.post('/programs', async (req, res) => {
  */
 adminRouter.delete('/programs/:id', async (req, res) => {
   try {
+    const programId = req.params.id;
+
+    // 1. Delete any enrollments associated with this program
+    await supabaseAdmin
+      .from('program_enrollments')
+      .delete()
+      .eq('program_id', programId);
+
+    // 2. Delete legacy sessions associated with this program (if any)
+    await supabaseAdmin
+      .from('wellness_sessions')
+      .delete()
+      .eq('program_id', programId);
+
+    // 3. Delete program from wellness_programs
     const { error } = await supabaseAdmin
       .from('wellness_programs')
       .delete()
-      .eq('id', req.params.id);
+      .eq('id', programId);
 
     if (error) {
-      res.status(500).json({ error: 'Failed to delete program' });
+      console.error('Delete program DB error:', error);
+      res.status(500).json({ error: error.message || 'Failed to delete program' });
       return;
     }
 
     res.json({ success: true });
-  } catch (err) {
+  } catch (err: any) {
     console.error('Delete program error:', err);
-    res.status(500).json({ error: 'Failed to delete program' });
+    res.status(500).json({ error: err?.message || 'Failed to delete program' });
   }
 });
 
