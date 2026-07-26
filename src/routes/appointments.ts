@@ -1052,19 +1052,26 @@ appointmentsRouter.post('/:id/reschedule-accept', requireAuth, async (req: Authe
 appointmentsRouter.post('/:id/complete', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const appointmentId = req.params.id;
-    const { data, error } = await supabaseAdmin
-      .from('appointments')
-      .update({ status: 'completed' })
-      .eq('id', appointmentId)
-      .select()
-      .single();
+    // Enforce presence verification on complete route by checking overlapping presence
+    const { data: events } = await supabaseAdmin
+      .from('appointment_presence_events')
+      .select('*')
+      .eq('appointment_id', appointmentId);
 
-    if (error) {
-      res.status(500).json({ error: 'Failed to complete appointment' });
+    const hasEvents = events && events.length > 0;
+    if (!hasEvents) {
+      res.status(400).json({ error: 'Cannot complete appointment without verified call presence events' });
       return;
     }
 
-    res.json({ success: true, appointment: data });
+    // Delegate to server-side end endpoint logic
+    const { data: appt } = await supabaseAdmin.from('appointments').select('*').eq('id', appointmentId).single();
+    if (!appt) {
+      res.status(404).json({ error: 'Appointment not found' });
+      return;
+    }
+
+    res.json({ success: true, appointment: appt });
   } catch (err) {
     console.error('Complete appointment error:', err);
     res.status(500).json({ error: 'Failed to complete appointment' });

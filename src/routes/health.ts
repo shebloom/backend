@@ -384,34 +384,6 @@ healthRouter.post('/prescriptions', requireAuth, requireRole('doctor'), async (r
         attachment_url: fileDownloadUrl,
       });
     }
-
-    // 7. Auto-update corresponding appointment status to 'completed'
-    const { data: docRecord } = await supabaseAdmin
-      .from('doctors')
-      .select('id')
-      .eq('user_id', req.userId)
-      .maybeSingle();
-
-    if (docRecord?.id) {
-      const { appointment_id } = req.body;
-      if (appointment_id) {
-        await supabaseAdmin
-          .from('appointments')
-          .update({ status: 'completed' })
-          .eq('id', appointment_id);
-      } else {
-        // Target only today/past active appointments — NEVER update future appointments to 'completed'
-        const todayStr = new Date().toISOString().split('T')[0];
-        await supabaseAdmin
-          .from('appointments')
-          .update({ status: 'completed' })
-          .eq('patient_id', patient_id)
-          .eq('doctor_id', docRecord.id)
-          .lte('appointment_date', todayStr)
-          .in('status', ['confirmed', 'pending', 'rescheduled']);
-      }
-    }
-
     res.status(201).json({ success: true, record: recordData });
   } catch (err) {
     console.error('Generate prescription error:', err);
