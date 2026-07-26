@@ -754,11 +754,21 @@ appointmentsRouter.post('/:id/end', requireAuth, async (req: AuthenticatedReques
       }
     }
 
-    let finalStatus = 'completed';
+    const now = new Date();
+    const scheduledStart = parseAppointmentTimeAsIST(appt.appointment_date, appt.slot_time);
+    const graceEnd = new Date(scheduledStart.getTime() + CONSULTATION_JOIN_WINDOW_MS);
+    const isWindowStillActive = now <= graceEnd;
+
+    let finalStatus = appt.status;
     let noShowType: string | null = null;
 
     if (maxOverlapMs > 0) {
       finalStatus = 'completed';
+      noShowType = null;
+    } else if (isWindowStillActive) {
+      // Window is still active (e.g., doctor exited call room early or patient declined)
+      // Do NOT set to missed while the window is still open! Keep status active.
+      finalStatus = ['confirmed', 'pending', 'rescheduled'].includes(appt.status) ? appt.status : 'confirmed';
       noShowType = null;
     } else if (hasDoctorJoined && !hasPatientJoined) {
       finalStatus = 'missed';
