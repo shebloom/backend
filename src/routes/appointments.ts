@@ -430,6 +430,18 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       return;
     }
 
+    // ── DOCTOR-INITIATED CALL GATE ──
+    // Patient cannot join until doctor has clicked "Start Call" (appointment.call_started === true)
+    if (isPatient && !isDoctor && !appointment.call_started) {
+      res.json({
+        joinable: false,
+        reason: 'waiting_for_doctor',
+        error: `Waiting for ${appointment.doctors?.users?.full_name || 'Dr. Deepa Madhavan'} to start the call. Please stay on this screen.`,
+        call_started: false,
+      });
+      return;
+    }
+
     // ── WITHIN ACTIVE WINDOW (now >= scheduledStart && now <= graceEnd) ──
     // NOTE: Do NOT update status to 'completed' here — that would immediately remove the
     // appointment from the 'upcoming' list and the join window would vanish for both parties.
@@ -501,10 +513,284 @@ appointmentsRouter.get('/:id/join', requireAuth, async (req: AuthenticatedReques
       doctorUserId: appointment.doctors?.user_id,
       patientName: appointment.users?.full_name || 'Patient',
       doctorName: appointment.doctors?.users?.full_name || 'Dr. Deeba',
+      call_started: !!appointment.call_started,
     });
   } catch (err) {
     console.error('Join appointment call error:', err);
     res.status(500).json({ error: 'Failed to authorize call entry' });
+  }
+});
+
+/**
+ * POST /api/appointments/:id/start-call
+ * Doctor initiates the call during the scheduled window.
+ */
+appointmentsRouter.post('/:id/start-call', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const appointmentId = req.params.id;
+    const { data: appointment, error: apptErr } = await supabaseAdmin
+      .from('appointments')
+      .select('*, doctors(*, users!inner(full_name, avatar_url)), users!appointments_patient_id_fkey(full_name)')
+      .eq('id', appointmentId)
+      .single();
+
+    if (apptErr || !appointment) {
+      res.status(404).json({ error: 'Appointment not found' });
+      return;
+    }
+
+    const isDoctor = req.userId === appointment.doctors?.user_id || req.userId === appointment.doctor_id || req.userRole === 'doctor';
+    if (!isDoctor) {
+      res.status(403).json({ error: 'Only the assigned doctor can initiate the consultation call' });
+      return;
+    }
+
+    const now = new Date();
+    const scheduledStart = parseAppointmentTimeAsIST(appointment.appointment_date, appointment.slot_time);
+    const graceEnd = new Date(scheduledStart.getTime() + CONSULTATION_JOIN_WINDOW_MS);
+
+    if (now < scheduledStart) {
+      res.status(400).json({ error: 'Cannot start call before the scheduled time' });
+      return;
+    }
+    if (now > graceEnd) {
+      res.status(400).json({ error: 'The consultation join window has expired' });
+      return;
+    }
+
+    const nowIso = now.toISOString();
+    await supabaseAdmin
+      .from('appointments')
+      .update({
+        call_started: true,
+        call_started_at: nowIso,
+        doctor_joined_at: nowIso,
+      })
+      .eq('id', appointmentId);
+
+    // Record presence event for doctor
+    try {
+      await supabaseAdmin
+        .from('appointment_presence_events')
+        .insert({
+          appointment_id: appointmentId,
+          user_id: req.userId,
+          role: 'doctor',
+          event_type: 'joined',
+        });
+    } catch (e) {}
+
+    // Broadcast incoming_call realtime event to patient
+    const cleanHash = appointment.id.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
+    const roomUrl = appointment.video_room_url || `https://meet.jit.si/SheBloomConsult${cleanHash}`;
+    const payload = {
+      appointmentId: appointment.id,
+      callerId: req.userId,
+      callerName: appointment.doctors?.users?.full_name || 'Dr. Deepa Madhavan',
+      callerAvatar: appointment.doctors?.users?.avatar_url,
+      recipientId: appointment.patient_id,
+      doctorId: req.userId,
+      patientId: appointment.patient_id,
+      roomUrl,
+      date: appointment.appointment_date,
+      slot: appointment.slot_time,
+      expiresAt: Date.now() + 15 * 60 * 1000,
+    };
+
+    try {
+      const roomChannel = supabaseAdmin.channel(`appointment-room-${appointmentId}`, {
+        config: { broadcast: { self: false } },
+      });
+      roomChannel.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          roomChannel.send({ type: 'broadcast', event: 'incoming_call', payload }).catch(() => {});
+        }
+      });
+      roomChannel.send({ type: 'broadcast', event: 'incoming_call', payload }).catch(() => {});
+
+      const notifChannel = supabaseAdmin.channel('shebloom-notifications');
+      notifChannel.send({ type: 'broadcast', event: 'incoming_call', payload }).catch(() => {});
+    } catch (bcErr) {
+      console.warn('[start-call] Broadcast notice warning:', bcErr);
+    }
+
+    res.json({
+      success: true,
+      call_started: true,
+      joinUrl: roomUrl,
+      appointmentId: appointment.id,
+    });
+  } catch (err: any) {
+    console.error('Start call error:', err);
+    res.status(500).json({ error: 'Failed to initiate call' });
+  }
+});
+
+/**
+ * POST /api/appointments/:id/events/presence
+ * Tracks participant joined and left timestamps for server-side overlap calculation.
+ */
+appointmentsRouter.post('/:id/events/presence', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const appointmentId = req.params.id;
+    const { event } = req.body;
+    if (!['joined', 'left'].includes(event)) {
+      res.status(400).json({ error: 'Invalid presence event type' });
+      return;
+    }
+
+    const { data: appt } = await supabaseAdmin
+      .from('appointments')
+      .select('id, patient_id, doctor_id, doctors(user_id)')
+      .eq('id', appointmentId)
+      .single();
+
+    if (!appt) {
+      res.status(404).json({ error: 'Appointment not found' });
+      return;
+    }
+
+    const docUserId = Array.isArray(appt.doctors) ? appt.doctors[0]?.user_id : (appt.doctors as any)?.user_id;
+    const isDoctor = req.userId === docUserId || req.userId === appt.doctor_id || req.userRole === 'doctor';
+    const role = isDoctor ? 'doctor' : 'patient';
+    const nowIso = new Date().toISOString();
+
+    try {
+      await supabaseAdmin
+        .from('appointment_presence_events')
+        .insert({
+          appointment_id: appointmentId,
+          user_id: req.userId,
+          role,
+          event_type: event,
+        });
+    } catch (e) {}
+
+    const updateFields: Record<string, any> = {};
+    if (role === 'doctor') {
+      if (event === 'joined') updateFields.doctor_joined_at = nowIso;
+      if (event === 'left') updateFields.doctor_left_at = nowIso;
+    } else {
+      if (event === 'joined') updateFields.patient_joined_at = nowIso;
+      if (event === 'left') updateFields.patient_left_at = nowIso;
+    }
+
+    if (Object.keys(updateFields).length > 0) {
+      await supabaseAdmin.from('appointments').update(updateFields).eq('id', appointmentId);
+    }
+
+    res.json({ success: true, role, event });
+  } catch (err: any) {
+    console.error('Presence event error:', err);
+    res.status(500).json({ error: 'Failed to record presence event' });
+  }
+});
+
+/**
+ * POST /api/appointments/:id/end
+ * Ends call session and server-verifies overlapping participant presence before marking completed.
+ */
+appointmentsRouter.post('/:id/end', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const appointmentId = req.params.id;
+    const { data: appt } = await supabaseAdmin
+      .from('appointments')
+      .select('*')
+      .eq('id', appointmentId)
+      .single();
+
+    if (!appt) {
+      res.status(404).json({ error: 'Appointment not found' });
+      return;
+    }
+
+    const { data: events } = await supabaseAdmin
+      .from('appointment_presence_events')
+      .select('*')
+      .eq('appointment_id', appointmentId)
+      .order('created_at', { ascending: true });
+
+    const allEvents = events || [];
+    const docEvents = allEvents.filter(e => e.role === 'doctor');
+    const patEvents = allEvents.filter(e => e.role === 'patient');
+
+    const docJoined = appt.doctor_joined_at ? new Date(appt.doctor_joined_at).getTime() : null;
+    const docLeft = appt.doctor_left_at ? new Date(appt.doctor_left_at).getTime() : null;
+    const patJoined = appt.patient_joined_at ? new Date(appt.patient_joined_at).getTime() : null;
+    const patLeft = appt.patient_left_at ? new Date(appt.patient_left_at).getTime() : null;
+
+    const hasDoctorJoined = docEvents.some(e => e.event_type === 'joined') || docJoined !== null;
+    const hasPatientJoined = patEvents.some(e => e.event_type === 'joined') || patJoined !== null;
+
+    const getIntervals = (roleEvents: any[], firstJoin: number | null, lastLeft: number | null) => {
+      const intervals: { joined: number; left: number }[] = [];
+      let currentJoin: number | null = firstJoin;
+      for (const ev of roleEvents) {
+        const time = new Date(ev.created_at).getTime();
+        if (ev.event_type === 'joined') {
+          currentJoin = time;
+        } else if (ev.event_type === 'left' && currentJoin !== null) {
+          intervals.push({ joined: currentJoin, left: time });
+          currentJoin = null;
+        }
+      }
+      if (currentJoin !== null) {
+        intervals.push({ joined: currentJoin, left: lastLeft || Date.now() });
+      }
+      return intervals;
+    };
+
+    const docIntervals = getIntervals(docEvents, docJoined, docLeft);
+    const patIntervals = getIntervals(patEvents, patJoined, patLeft);
+
+    let maxOverlapMs = 0;
+    for (const d of docIntervals) {
+      for (const p of patIntervals) {
+        const overlapStart = Math.max(d.joined, p.joined);
+        const overlapEnd = Math.min(d.left, p.left);
+        if (overlapEnd > overlapStart) {
+          maxOverlapMs += (overlapEnd - overlapStart);
+        }
+      }
+    }
+
+    let finalStatus = 'completed';
+    let noShowType: string | null = null;
+
+    if (maxOverlapMs > 0) {
+      finalStatus = 'completed';
+      noShowType = null;
+    } else if (hasDoctorJoined && !hasPatientJoined) {
+      finalStatus = 'missed';
+      noShowType = 'patient_no_show';
+    } else if (hasPatientJoined && !hasDoctorJoined) {
+      finalStatus = 'missed';
+      noShowType = 'doctor_no_show';
+    } else if (!hasDoctorJoined && !hasPatientJoined) {
+      finalStatus = 'missed';
+      noShowType = 'no_show';
+    } else {
+      finalStatus = 'missed';
+      noShowType = 'no_overlap';
+    }
+
+    await supabaseAdmin.from('appointments').update({
+      status: finalStatus,
+      no_show_type: noShowType,
+      updated_at: new Date().toISOString(),
+    }).eq('id', appointmentId);
+
+    res.json({
+      success: true,
+      status: finalStatus,
+      no_show_type: noShowType,
+      overlapSeconds: Math.floor(maxOverlapMs / 1000),
+      hasDoctorJoined,
+      hasPatientJoined,
+    });
+  } catch (err: any) {
+    console.error('End call error:', err);
+    res.status(500).json({ error: 'Failed to evaluate call presence' });
   }
 });
 

@@ -57,8 +57,36 @@ async function run() {
     `);
     console.log('Successfully set up storage policies.');
 
+    // 4. Add call initiation & presence columns to appointments
+    console.log('Adding call initiation and presence columns to appointments...');
+    await client.query(`
+      ALTER TABLE public.appointments
+      ADD COLUMN IF NOT EXISTS call_started BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS call_started_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS doctor_joined_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS doctor_left_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS patient_joined_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS patient_left_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS no_show_type TEXT;
+    `);
+    console.log('Successfully added call initiation and presence columns.');
+
+    // 5. Create appointment_presence_events table
+    console.log('Creating appointment_presence_events table...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.appointment_presence_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        appointment_id UUID REFERENCES public.appointments(id) ON DELETE CASCADE,
+        user_id UUID,
+        role TEXT CHECK (role IN ('doctor', 'patient')),
+        event_type TEXT CHECK (event_type IN ('joined', 'left')),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    console.log('Successfully created appointment_presence_events table.');
+
   } catch (err) {
-    console.error('Migration failed:', err);
+    console.error('Migration error:', err);
   } finally {
     await client.end();
   }

@@ -263,6 +263,33 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
       }
     }
 
+    // Ensure doctor_id and patient_id exist in public.users to prevent FK constraint failures
+    if (req.userId) {
+      const { data: docUser } = await supabaseAdmin.from('users').select('id').eq('id', req.userId).maybeSingle();
+      if (!docUser) {
+        console.warn(`[diet-attach] Creating missing doctor user record in public.users for ${req.userId}`);
+        await supabaseAdmin.from('users').insert({
+          id: req.userId,
+          email: req.userEmail || `${req.userId.substring(0, 8)}@shebloom.local`,
+          full_name: 'Dr. Deepa Madhavan',
+          role: 'doctor',
+        });
+      }
+    }
+
+    if (patient_id) {
+      const { data: patUser } = await supabaseAdmin.from('users').select('id').eq('id', patient_id).maybeSingle();
+      if (!patUser) {
+        console.warn(`[diet-attach] Creating missing patient user record in public.users for ${patient_id}`);
+        await supabaseAdmin.from('users').insert({
+          id: patient_id,
+          email: `${patient_id.substring(0, 8)}@shebloom.local`,
+          full_name: 'Patient',
+          role: 'patient',
+        });
+      }
+    }
+
     let data: any;
     let error: any;
 
@@ -312,10 +339,15 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
     }
 
     if (error) {
-      console.error('[diet-attach] Insert/Update diet plan DB error:', error.message, error.details, error.hint);
+      console.error('[diet-attach] Insert/Update diet plan DB error:', error.message, error.details, error.hint, error.code);
+      const errorMessage = error.message
+        ? `Failed to save diet plan to database: ${error.message}${error.details ? ` (${error.details})` : ''}`
+        : 'Failed to save diet plan to database';
       res.status(400).json({
-        error: 'Failed to save diet plan to database',
-        details: error.message || String(error),
+        error: errorMessage,
+        details: error.details || error.message,
+        hint: error.hint,
+        code: error.code,
       });
       return;
     }
@@ -353,9 +385,9 @@ dietRouter.post('/attach', requireAuth, async (req: AuthenticatedRequest, res) =
     }
 
     res.status(201).json({ diet_plan: normalizedData });
-  } catch (err) {
+  } catch (err: any) {
     console.error('Attach diet plan error:', err);
-    res.status(500).json({ error: 'Failed to attach diet plan' });
+    res.status(500).json({ error: `Failed to attach diet plan: ${err?.message || String(err)}` });
   }
 });
 
