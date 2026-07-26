@@ -85,6 +85,29 @@ async function run() {
     `);
     console.log('Successfully created appointment_presence_events table.');
 
+    // 6. Create diet_plans table if missing & reload PostgREST schema cache
+    console.log('Creating diet_plans table and reloading PostgREST schema cache...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.diet_plans (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        appointment_id UUID UNIQUE REFERENCES public.appointments(id) ON DELETE CASCADE,
+        patient_id UUID REFERENCES public.users(id) NOT NULL,
+        doctor_id UUID REFERENCES public.users(id) NOT NULL,
+        title TEXT NOT NULL,
+        plan_details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        document_url TEXT,
+        notes TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_diet_plans_patient ON public.diet_plans (patient_id, created_at DESC);
+
+      -- Force Supabase PostgREST API to refresh schema cache immediately
+      NOTIFY pgrst, 'reload schema';
+    `);
+    console.log('Successfully created diet_plans table and reloaded PostgREST schema cache.');
+
   } catch (err) {
     console.error('Migration error:', err);
   } finally {
